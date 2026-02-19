@@ -1,0 +1,141 @@
+generator client {
+  provider = "prisma-client"
+  output   = "../src/generated/prisma"
+}
+
+datasource db {
+  provider = "mysql"
+}
+
+model User {
+  id            String    @id @default(cuid())
+  name          String?
+  email         String    @unique
+  emailVerified DateTime?
+  image         String?
+  role          UserRole  @default(VIEWER)
+  accounts      Account[]
+  sessions      Session[]
+  executions    ScriptExecution[]
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+}
+
+model Account {
+  id                String  @id @default(cuid())
+  userId            String
+  type              String
+  provider          String
+  providerAccountId String
+  refresh_token     String? @db.Text
+  access_token      String? @db.Text
+  expires_at        Int?
+  token_type        String?
+  scope             String?
+  id_token          String? @db.Text
+  session_state     String?
+  user              User    @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([provider, providerAccountId])
+}
+
+model Session {
+  id           String   @id @default(cuid())
+  sessionToken String   @unique
+  userId       String
+  expires      DateTime
+  user         User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+}
+
+model VerificationToken {
+  identifier String
+  token      String   @unique
+  expires    DateTime
+
+  @@unique([identifier, token])
+}
+
+model Category {
+  id          String   @id @default(cuid())
+  name        String   @unique
+  description String?  @db.Text
+  icon        String?
+  sortOrder   Int      @default(0)
+  scripts     Script[]
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+}
+
+model Script {
+  id          String            @id @default(cuid())
+  name        String
+  slug        String            @unique
+  description String?           @db.Text
+  content     String            @db.LongText
+  categoryId  String
+  category    Category          @relation(fields: [categoryId], references: [id])
+  parameters  ScriptParameter[]
+  executions  ScriptExecution[]
+  tags        String?
+  isActive    Boolean           @default(true)
+  requiresAdmin Boolean         @default(false)
+  createdAt   DateTime          @default(now())
+  updatedAt   DateTime          @updatedAt
+
+  @@index([categoryId])
+  @@index([slug])
+}
+
+model ScriptParameter {
+  id           String  @id @default(cuid())
+  scriptId     String
+  script       Script  @relation(fields: [scriptId], references: [id], onDelete: Cascade)
+  name         String
+  label        String
+  type         ParamType @default(STRING)
+  required     Boolean   @default(false)
+  defaultValue String?
+  description  String?   @db.Text
+  sortOrder    Int       @default(0)
+
+  @@index([scriptId])
+}
+
+model ScriptExecution {
+  id        String          @id @default(cuid())
+  scriptId  String
+  script    Script          @relation(fields: [scriptId], references: [id])
+  userId    String
+  user      User            @relation(fields: [userId], references: [id])
+  params    String?         @db.Text
+  output    String?         @db.LongText
+  status    ExecutionStatus @default(PENDING)
+  startedAt DateTime        @default(now())
+  endedAt   DateTime?
+  error     String?         @db.Text
+
+  @@index([scriptId])
+  @@index([userId])
+}
+
+enum UserRole {
+  VIEWER
+  OPERATOR
+  ADMIN
+}
+
+enum ParamType {
+  STRING
+  NUMBER
+  BOOLEAN
+  SELECT
+  MULTILINE
+}
+
+enum ExecutionStatus {
+  PENDING
+  RUNNING
+  SUCCESS
+  FAILED
+  CANCELLED
+}
