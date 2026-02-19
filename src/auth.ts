@@ -3,19 +3,26 @@ import { PrismaAdapter } from "@auth/prisma-adapter";
 import { prisma } from "@/lib/prisma";
 import { authConfig } from "@/auth.config";
 
-// Users who should automatically be assigned ADMIN role
+// Users who should automatically be assigned roles on first sign-in
 const AUTO_ADMIN_EMAILS = ["jmiller@yrefy.com"];
+const AUTO_OPERATOR_EMAILS = ["kwilson@yrefy.com", "crees@yrefy.com"];
 
 export const { handlers, auth, signIn, signOut } = NextAuth({
   ...authConfig,
   adapter: PrismaAdapter(prisma),
   events: {
     async createUser({ user }) {
-      // Auto-assign ADMIN role on first sign-in for designated users
-      if (user.email && AUTO_ADMIN_EMAILS.includes(user.email.toLowerCase())) {
+      // Auto-assign roles on first sign-in
+      const email = user.email?.toLowerCase();
+      if (email && AUTO_ADMIN_EMAILS.includes(email)) {
         await prisma.user.update({
           where: { id: user.id! },
           data: { role: "ADMIN" },
+        });
+      } else if (email && AUTO_OPERATOR_EMAILS.includes(email)) {
+        await prisma.user.update({
+          where: { id: user.id! },
+          data: { role: "OPERATOR" },
         });
       }
     },
