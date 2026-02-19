@@ -1,7 +1,10 @@
+import "dotenv/config";
 import { PrismaClient } from "../src/generated/prisma/client";
+import { PrismaMariaDb } from "@prisma/adapter-mariadb";
 
-// @ts-expect-error -- Prisma v7 constructor typing requires adapter but runtime resolves from prisma.config.ts
-const prisma: PrismaClient = new PrismaClient();
+const adapter = new PrismaMariaDb(process.env.DATABASE_URL!);
+
+const prisma = new PrismaClient({ adapter });
 
 async function main() {
   console.log("Seeding database...");

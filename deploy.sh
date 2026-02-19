@@ -95,9 +95,9 @@ log "Generating Prisma client..."
 npx prisma generate
 ok "Prisma client generated"
 
-log "Running database migrations..."
-npx prisma migrate deploy
-ok "Migrations applied"
+log "Pushing database schema..."
+npx prisma db push --skip-generate
+ok "Database schema applied"
 
 log "Seeding database..."
 npx prisma db seed || warn "Seed may have already been applied (upserts are idempotent)"

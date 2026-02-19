@@ -13,6 +13,7 @@
   },
   "dependencies": {
     "@auth/prisma-adapter": "^2.0.0",
+    "@prisma/adapter-mariadb": "^7.4.1",
     "@prisma/client": "^7.4.0",
     "@types/react-syntax-highlighter": "^15.5.13",
     "dotenv": "^16.0.0",
