@@ -96,7 +96,7 @@ npx prisma generate
 ok "Prisma client generated"
 
 log "Pushing database schema..."
-npx prisma db push --skip-generate
+npx prisma db push
 ok "Database schema applied"
 
 log "Seeding database..."
