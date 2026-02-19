@@ -12,11 +12,13 @@ const prisma = new PrismaClient({ adapter });
 const NEW_USER_PROVISIONING_SCRIPT = `# =============================================================================
 # New User Provisioning - Yrefy / Ignyte / Invessio
 # =============================================================================
+# Interactive phase-based provisioning with review at each step.
+# Each phase displays results and lets you edit before proceeding.
+#
 # Requires: Microsoft.Graph PowerShell module
 # Permissions: User.ReadWrite.All, Directory.ReadWrite.All
 #
 # Input CSV columns: FirstName, LastName, Company, JobTitle, Manager
-# Manager column should be the manager's UPN (e.g. ehanna@yrefy.com)
 # =============================================================================
 
 param(
@@ -24,8 +26,6 @@ param(
     [string]$CsvPath,
 
     [string]$OutputDir = ".\\\\output",
-
-    [switch]$WhatIf,
 
     [string]$DefaultPassword = ""
 )
@@ -47,7 +47,6 @@ $DomainMap = @{
     "Invessio" = "invessio.com"
 }
 
-# Department assignment rules: pattern → department
 $SalesTitlePatterns = @(
     "Student Loan Advocate"
 )
@@ -74,67 +73,77 @@ $EngineeringTitlePatterns = @(
 
 # ── Helper Functions ─────────────────────────────────────────────────────────
 
+function Write-Phase {
+    param([int]$Number, [string]$Title)
+    Write-Host ""
+    Write-Host "=============================================" -ForegroundColor Cyan
+    Write-Host " PHASE $Number: $Title" -ForegroundColor Cyan
+    Write-Host "=============================================" -ForegroundColor Cyan
+}
+
+function Get-Confirmation {
+    param([string]$Prompt = "Continue?")
+    Write-Host ""
+    $choice = Read-Host "$Prompt [Y]es / [E]dit / [Q]uit"
+    return $choice.ToUpper()
+}
+
+function Edit-UserField {
+    param(
+        [array]$Users,
+        [string]$FieldName
+    )
+    $rowNum = Read-Host "Enter row number to edit (1-$($Users.Count))"
+    $idx = [int]$rowNum - 1
+    if ($idx -lt 0 -or $idx -ge $Users.Count) {
+        Write-Host "Invalid row number." -ForegroundColor Red
+        return $Users
+    }
+    $currentVal = $Users[$idx].$FieldName
+    $newVal = Read-Host "Current value: '$currentVal'. Enter new value"
+    if ($newVal -ne "") {
+        $Users[$idx].$FieldName = $newVal
+        Write-Host "Updated row $rowNum $FieldName to '$newVal'" -ForegroundColor Green
+    }
+    return $Users
+}
+
 function Get-CleanLastName {
     param([string]$LastName)
-    # Remove hyphens, spaces, apostrophes, special characters — keep alpha only
     return ($LastName -replace "[^a-zA-Z]", "").ToLower()
 }
 
 function Get-FirstInitial {
     param([string]$FirstName)
-    # Handle hyphenated first names (To-Trinh → T), take first alpha char
     $clean = ($FirstName -replace "[^a-zA-Z]", "")
     return $clean.Substring(0, 1).ToLower()
 }
 
 function Get-UserPrincipalName {
-    param(
-        [string]$FirstName,
-        [string]$LastName,
-        [string]$Company
-    )
-
+    param([string]$FirstName, [string]$LastName, [string]$Company)
     $initial = Get-FirstInitial -FirstName $FirstName
     $last    = Get-CleanLastName -LastName $LastName
     $domain  = $DomainMap[$Company]
-
     if (-not $domain) {
-        Write-Warning "Unknown company '$Company' — defaulting to yrefy.com"
+        Write-Warning "Unknown company '$Company' - defaulting to yrefy.com"
         $domain = "yrefy.com"
     }
-
     return "\${initial}\${last}@\${domain}"
 }
 
 function Get-Department {
-    param(
-        [string]$JobTitle,
-        [string]$Company
-    )
-
-    # Sales check
+    param([string]$JobTitle, [string]$Company)
     foreach ($pattern in $SalesTitlePatterns) {
-        if ($JobTitle -match [regex]::Escape($pattern)) {
-            return "Sales"
-        }
+        if ($JobTitle -match [regex]::Escape($pattern)) { return "Sales" }
     }
-
-    # Operations check
     foreach ($pattern in $OperationsTitlePatterns) {
-        if ($JobTitle -match [regex]::Escape($pattern)) {
-            return "Operations"
-        }
+        if ($JobTitle -match [regex]::Escape($pattern)) { return "Operations" }
     }
-
-    # Engineering check (Invessio technical roles)
     if ($Company -eq "Invessio") {
         foreach ($pattern in $EngineeringTitlePatterns) {
-            if ($JobTitle -match [regex]::Escape($pattern)) {
-                return "Engineering"
-            }
+            if ($JobTitle -match [regex]::Escape($pattern)) { return "Engineering" }
         }
     }
-
     return "General"
 }
 
@@ -144,60 +153,41 @@ function Test-UserExists {
         $existing = Get-MgUser -Filter "userPrincipalName eq '$UPN'" -ErrorAction Stop
         return ($null -ne $existing -and $existing.Count -gt 0)
     }
-    catch {
-        return $false
-    }
+    catch { return $false }
 }
 
-function Get-ManagerByUPN {
+function Get-ManagerUser {
     param([string]$ManagerInput)
-
-    # If it looks like a UPN (contains @), search directly
     if ($ManagerInput -match "@") {
         try {
             return Get-MgUser -Filter "userPrincipalName eq '$ManagerInput'" -ErrorAction Stop
         }
-        catch {
-            Write-Warning "  Manager UPN '$ManagerInput' not found"
-            return $null
-        }
+        catch { return $null }
     }
-
-    # Otherwise try display name match
     try {
         $result = Get-MgUser -Filter "displayName eq '$ManagerInput'" -ErrorAction Stop
-        if ($result -and $result.Count -eq 1) {
-            return $result
-        }
-        elseif ($result -and $result.Count -gt 1) {
-            Write-Warning "  Multiple users match manager name '$ManagerInput' — skipping manager assignment. Use UPN instead."
-            return $null
-        }
+        if ($result -and $result.Count -eq 1) { return $result }
     }
     catch { }
-
-    Write-Warning "  Manager '$ManagerInput' not found"
     return $null
 }
 
 function New-TempPassword {
     if ($DefaultPassword) { return $DefaultPassword }
-    # Generate 16-char password: upper + lower + digits + symbols
-    return -join ((65..90) + (97..122) + (48..57) + (33, 35, 36, 37, 42) | Get-Random -Count 16 | ForEach-Object { [char]$_ })
+    return -join ((65..90) + (97..122) + (48..57) + (33,35,36,37,42) | Get-Random -Count 16 | ForEach-Object { [char]$_ })
 }
 
-# ── Main Processing ──────────────────────────────────────────────────────────
+# ── Validate Input ───────────────────────────────────────────────────────────
 
-# Validate input
 if (-not (Test-Path $CsvPath)) {
     Write-Error "CSV file not found: $CsvPath"
     Disconnect-MgGraph
     exit 1
 }
 
-$users = Import-Csv -Path $CsvPath
+$csvUsers = Import-Csv -Path $CsvPath
 $requiredColumns = @("FirstName", "LastName", "Company", "JobTitle", "Manager")
-$csvColumns = ($users | Get-Member -MemberType NoteProperty).Name
+$csvColumns = ($csvUsers | Get-Member -MemberType NoteProperty).Name
 foreach ($col in $requiredColumns) {
     if ($col -notin $csvColumns) {
         Write-Error "CSV is missing required column: $col"
@@ -206,84 +196,370 @@ foreach ($col in $requiredColumns) {
     }
 }
 
-# Create output directory
 if (-not (Test-Path $OutputDir)) {
     New-Item -ItemType Directory -Path $OutputDir -Force | Out-Null
 }
 
+Write-Host ""
 Write-Host "=============================================" -ForegroundColor Cyan
-Write-Host " New User Provisioning" -ForegroundColor Cyan
-Write-Host " Users to process: $($users.Count)" -ForegroundColor Cyan
-if ($WhatIf) {
-    Write-Host " MODE: DRY RUN (no changes will be made)" -ForegroundColor Yellow
+Write-Host " New User Provisioning (Interactive)" -ForegroundColor Cyan
+Write-Host " Users in CSV: $($csvUsers.Count)" -ForegroundColor Cyan
+Write-Host "=============================================" -ForegroundColor Cyan
+
+# Build working array with all computed fields
+$roster = [System.Collections.ArrayList]@()
+foreach ($row in $csvUsers) {
+    $fn = $row.FirstName.Trim()
+    $ln = $row.LastName.Trim()
+    $co = $row.Company.Trim()
+    $jt = $row.JobTitle.Trim()
+    $mg = $row.Manager.Trim()
+    [void]$roster.Add([PSCustomObject]@{
+        Row         = $roster.Count + 1
+        FirstName   = $fn
+        LastName    = $ln
+        Company     = $co
+        JobTitle    = $jt
+        Manager     = $mg
+        UPN         = Get-UserPrincipalName -FirstName $fn -LastName $ln -Company $co
+        DisplayName = "$fn $ln"
+        Department  = Get-Department -JobTitle $jt -Company $co
+        Duplicate   = $false
+        ManagerUPN  = ""
+        ManagerName = ""
+        Status      = "Pending"
+    })
+}
+
+# ==========================================================================
+# PHASE 1: Review UPN Generation
+# ==========================================================================
+
+$phase1Done = $false
+while (-not $phase1Done) {
+    Write-Phase -Number 1 -Title "EMAIL / UPN GENERATION"
+    Write-Host ""
+    Write-Host ("{0,-4} {1,-20} {2,-20} {3,-10} {4,-35}" -f "#", "Name", "Company", "Domain", "Generated UPN")
+    Write-Host ("{0,-4} {1,-20} {2,-20} {3,-10} {4,-35}" -f "--", "----", "-------", "------", "--------------")
+    foreach ($u in $roster) {
+        $domain = $u.UPN.Split("@")[1]
+        Write-Host ("{0,-4} {1,-20} {2,-20} {3,-10} {4,-35}" -f $u.Row, $u.DisplayName, $u.Company, $domain, $u.UPN)
+    }
+
+    $choice = Get-Confirmation -Prompt "Phase 1: UPNs look correct?"
+    switch ($choice) {
+        "Y" { $phase1Done = $true }
+        "E" {
+            $field = Read-Host "Edit which field? [U]PN / [F]irstName / [L]astName / [C]ompany"
+            switch ($field.ToUpper()) {
+                "U" { $roster = Edit-UserField -Users $roster -FieldName "UPN" }
+                "F" {
+                    $roster = Edit-UserField -Users $roster -FieldName "FirstName"
+                    # Regenerate UPN and DisplayName for edited row
+                    $rowNum = Read-Host "Regenerate UPN for this row? [Y/N]"
+                    if ($rowNum -eq "Y") {
+                        $idx = [int](Read-Host "Row number") - 1
+                        $r = $roster[$idx]
+                        $r.UPN = Get-UserPrincipalName -FirstName $r.FirstName -LastName $r.LastName -Company $r.Company
+                        $r.DisplayName = "$($r.FirstName) $($r.LastName)"
+                        Write-Host "Regenerated: $($r.UPN)" -ForegroundColor Green
+                    }
+                }
+                "L" {
+                    $roster = Edit-UserField -Users $roster -FieldName "LastName"
+                    $rowNum = Read-Host "Regenerate UPN for this row? [Y/N]"
+                    if ($rowNum -eq "Y") {
+                        $idx = [int](Read-Host "Row number") - 1
+                        $r = $roster[$idx]
+                        $r.UPN = Get-UserPrincipalName -FirstName $r.FirstName -LastName $r.LastName -Company $r.Company
+                        $r.DisplayName = "$($r.FirstName) $($r.LastName)"
+                        Write-Host "Regenerated: $($r.UPN)" -ForegroundColor Green
+                    }
+                }
+                "C" {
+                    $roster = Edit-UserField -Users $roster -FieldName "Company"
+                    $idx = [int](Read-Host "Row number to regenerate UPN for") - 1
+                    $r = $roster[$idx]
+                    $r.UPN = Get-UserPrincipalName -FirstName $r.FirstName -LastName $r.LastName -Company $r.Company
+                    Write-Host "Regenerated: $($r.UPN)" -ForegroundColor Green
+                }
+                default { Write-Host "Invalid choice." -ForegroundColor Red }
+            }
+        }
+        "Q" {
+            Write-Host "Aborted by user." -ForegroundColor Yellow
+            Disconnect-MgGraph
+            exit 0
+        }
+    }
+}
+
+# ==========================================================================
+# PHASE 2: Review Department Assignments
+# ==========================================================================
+
+$phase2Done = $false
+while (-not $phase2Done) {
+    Write-Phase -Number 2 -Title "DEPARTMENT ASSIGNMENTS"
+    Write-Host ""
+    Write-Host ("{0,-4} {1,-20} {2,-30} {3,-15} {4,-10}" -f "#", "Name", "Job Title", "Department", "Company")
+    Write-Host ("{0,-4} {1,-20} {2,-30} {3,-15} {4,-10}" -f "--", "----", "---------", "----------", "-------")
+    foreach ($u in $roster) {
+        $deptColor = switch ($u.Department) {
+            "Sales"       { "Green" }
+            "Operations"  { "Yellow" }
+            "Engineering" { "Magenta" }
+            default       { "Gray" }
+        }
+        Write-Host ("{0,-4} {1,-20} {2,-30} " -f $u.Row, $u.DisplayName, $u.JobTitle) -NoNewline
+        Write-Host ("{0,-15} " -f $u.Department) -ForegroundColor $deptColor -NoNewline
+        Write-Host ("{0,-10}" -f $u.Company)
+    }
+
+    Write-Host ""
+    $salesCount = ($roster | Where-Object { $_.Department -eq "Sales" }).Count
+    $opsCount   = ($roster | Where-Object { $_.Department -eq "Operations" }).Count
+    $engCount   = ($roster | Where-Object { $_.Department -eq "Engineering" }).Count
+    $genCount   = ($roster | Where-Object { $_.Department -eq "General" }).Count
+    Write-Host "  Sales: $salesCount | Operations: $opsCount | Engineering: $engCount | General: $genCount" -ForegroundColor Cyan
+
+    $choice = Get-Confirmation -Prompt "Phase 2: Departments look correct?"
+    switch ($choice) {
+        "Y" { $phase2Done = $true }
+        "E" {
+            $rowNum = Read-Host "Enter row number to change department (1-$($roster.Count))"
+            $idx = [int]$rowNum - 1
+            if ($idx -ge 0 -and $idx -lt $roster.Count) {
+                Write-Host "Current: $($roster[$idx].Department)"
+                Write-Host "Options: [S]ales / [O]perations / [E]ngineering / [G]eneral"
+                $dept = Read-Host "New department"
+                $roster[$idx].Department = switch ($dept.ToUpper()) {
+                    "S" { "Sales" }
+                    "O" { "Operations" }
+                    "E" { "Engineering" }
+                    "G" { "General" }
+                    default { $roster[$idx].Department }
+                }
+                Write-Host "Updated row $rowNum to $($roster[$idx].Department)" -ForegroundColor Green
+            }
+        }
+        "Q" {
+            Write-Host "Aborted by user." -ForegroundColor Yellow
+            Disconnect-MgGraph
+            exit 0
+        }
+    }
+}
+
+# ==========================================================================
+# PHASE 3: Duplicate Check
+# ==========================================================================
+
+Write-Phase -Number 3 -Title "DUPLICATE CHECK"
+Write-Host ""
+Write-Host "Checking each UPN against existing tenant users..." -ForegroundColor White
+
+$dupCount = 0
+foreach ($u in $roster) {
+    $exists = Test-UserExists -UPN $u.UPN
+    $u.Duplicate = $exists
+    if ($exists) {
+        $dupCount++
+        Write-Host "  [DUPLICATE] $($u.UPN) already exists" -ForegroundColor Red
+    }
+    else {
+        Write-Host "  [OK]        $($u.UPN) is available" -ForegroundColor Green
+    }
+}
+
+if ($dupCount -gt 0) {
+    Write-Host ""
+    Write-Host "$dupCount duplicate(s) found. These will be skipped unless you edit their UPN." -ForegroundColor Yellow
+
+    $phase3Done = $false
+    while (-not $phase3Done) {
+        $choice = Get-Confirmation -Prompt "Phase 3: Handle duplicates?"
+        switch ($choice) {
+            "Y" { $phase3Done = $true }
+            "E" {
+                $rowNum = Read-Host "Row number to edit UPN"
+                $idx = [int]$rowNum - 1
+                if ($idx -ge 0 -and $idx -lt $roster.Count -and $roster[$idx].Duplicate) {
+                    $newUpn = Read-Host "Enter new UPN for $($roster[$idx].DisplayName) (current: $($roster[$idx].UPN))"
+                    if ($newUpn -ne "") {
+                        $roster[$idx].UPN = $newUpn
+                        # Re-check the new UPN
+                        $recheck = Test-UserExists -UPN $newUpn
+                        $roster[$idx].Duplicate = $recheck
+                        if ($recheck) {
+                            Write-Host "  '$newUpn' also exists. Still marked as duplicate." -ForegroundColor Red
+                        }
+                        else {
+                            Write-Host "  '$newUpn' is available!" -ForegroundColor Green
+                        }
+                    }
+                }
+                else {
+                    Write-Host "Invalid row or row is not a duplicate." -ForegroundColor Red
+                }
+            }
+            "Q" {
+                Write-Host "Aborted by user." -ForegroundColor Yellow
+                Disconnect-MgGraph
+                exit 0
+            }
+        }
+    }
 }
 else {
-    Write-Host " MODE: LIVE — users will be created" -ForegroundColor Red
+    Write-Host ""
+    Write-Host "No duplicates found. All UPNs are available." -ForegroundColor Green
+    Start-Sleep -Seconds 1
 }
-Write-Host "=============================================" -ForegroundColor Cyan
+
+# ==========================================================================
+# PHASE 4: Manager Lookup
+# ==========================================================================
+
+Write-Phase -Number 4 -Title "MANAGER LOOKUP"
+Write-Host ""
+Write-Host "Looking up managers in the tenant..." -ForegroundColor White
+
+foreach ($u in $roster) {
+    if ($u.Duplicate) { continue }
+    if (-not $u.Manager -or $u.Manager -eq "") {
+        $u.ManagerUPN  = "(none)"
+        $u.ManagerName = "(none)"
+        Write-Host "  $($u.DisplayName) -> No manager specified" -ForegroundColor Gray
+        continue
+    }
+
+    $mgr = Get-ManagerUser -ManagerInput $u.Manager
+    if ($mgr) {
+        $u.ManagerUPN  = $mgr.UserPrincipalName
+        $u.ManagerName = $mgr.DisplayName
+        Write-Host "  $($u.DisplayName) -> $($mgr.DisplayName) ($($mgr.UserPrincipalName))" -ForegroundColor Green
+    }
+    else {
+        $u.ManagerUPN  = "NOT FOUND"
+        $u.ManagerName = "NOT FOUND"
+        Write-Host "  $($u.DisplayName) -> '$($u.Manager)' NOT FOUND" -ForegroundColor Red
+    }
+}
+
+Write-Host ""
+Write-Host ("{0,-4} {1,-20} {2,-20} {3,-30} {4,-30}" -f "#", "New User", "Manager Input", "Resolved Name", "Resolved UPN")
+Write-Host ("{0,-4} {1,-20} {2,-20} {3,-30} {4,-30}" -f "--", "--------", "-------------", "-------------", "------------")
+foreach ($u in $roster) {
+    if ($u.Duplicate) { continue }
+    $color = if ($u.ManagerUPN -eq "NOT FOUND") { "Red" } elseif ($u.ManagerUPN -eq "(none)") { "Gray" } else { "White" }
+    Write-Host ("{0,-4} {1,-20} {2,-20} {3,-30} {4,-30}" -f $u.Row, $u.DisplayName, $u.Manager, $u.ManagerName, $u.ManagerUPN) -ForegroundColor $color
+}
+
+$notFound = ($roster | Where-Object { $_.ManagerUPN -eq "NOT FOUND" -and -not $_.Duplicate }).Count
+if ($notFound -gt 0) {
+    Write-Host ""
+    Write-Host "$notFound manager(s) not found. You can edit the manager value or continue without." -ForegroundColor Yellow
+}
+
+$phase4Done = $false
+while (-not $phase4Done) {
+    $choice = Get-Confirmation -Prompt "Phase 4: Manager assignments look correct?"
+    switch ($choice) {
+        "Y" { $phase4Done = $true }
+        "E" {
+            $rowNum = Read-Host "Row number to edit manager"
+            $idx = [int]$rowNum - 1
+            if ($idx -ge 0 -and $idx -lt $roster.Count) {
+                $newMgr = Read-Host "Enter manager UPN (e.g. jdoe@yrefy.com) for $($roster[$idx].DisplayName)"
+                if ($newMgr -ne "") {
+                    $roster[$idx].Manager = $newMgr
+                    # Re-lookup
+                    $mgr = Get-ManagerUser -ManagerInput $newMgr
+                    if ($mgr) {
+                        $roster[$idx].ManagerUPN  = $mgr.UserPrincipalName
+                        $roster[$idx].ManagerName = $mgr.DisplayName
+                        Write-Host "  Resolved: $($mgr.DisplayName) ($($mgr.UserPrincipalName))" -ForegroundColor Green
+                    }
+                    else {
+                        $roster[$idx].ManagerUPN  = "NOT FOUND"
+                        $roster[$idx].ManagerName = "NOT FOUND"
+                        Write-Host "  Still not found." -ForegroundColor Red
+                    }
+                }
+            }
+        }
+        "Q" {
+            Write-Host "Aborted by user." -ForegroundColor Yellow
+            Disconnect-MgGraph
+            exit 0
+        }
+    }
+}
+
+# ==========================================================================
+# PHASE 5: Final Review
+# ==========================================================================
+
+Write-Phase -Number 5 -Title "FINAL REVIEW"
 Write-Host ""
 
-$results     = @()
-$errors      = @()
-$duplicates  = @()
+$toCreate = $roster | Where-Object { -not $_.Duplicate }
+$toSkip   = $roster | Where-Object { $_.Duplicate }
 
-foreach ($row in $users) {
-    $firstName  = $row.FirstName.Trim()
-    $lastName   = $row.LastName.Trim()
-    $company    = $row.Company.Trim()
-    $jobTitle   = $row.JobTitle.Trim()
-    $managerRef = $row.Manager.Trim()
+Write-Host "The following $($toCreate.Count) user(s) WILL BE CREATED:" -ForegroundColor Green
+Write-Host ""
+Write-Host ("{0,-4} {1,-20} {2,-30} {3,-15} {4,-30} {5,-25}" -f "#", "Display Name", "UPN", "Department", "Job Title", "Manager")
+Write-Host ("{0,-4} {1,-20} {2,-30} {3,-15} {4,-30} {5,-25}" -f "--", "------------", "---", "----------", "---------", "-------")
+foreach ($u in $toCreate) {
+    $mgrDisplay = if ($u.ManagerName -eq "NOT FOUND" -or $u.ManagerName -eq "(none)") { $u.ManagerName } else { $u.ManagerName }
+    Write-Host ("{0,-4} {1,-20} {2,-30} {3,-15} {4,-30} {5,-25}" -f $u.Row, $u.DisplayName, $u.UPN, $u.Department, $u.JobTitle, $mgrDisplay)
+}
 
-    $upn         = Get-UserPrincipalName -FirstName $firstName -LastName $lastName -Company $company
-    $displayName = "$firstName $lastName"
-    $department  = Get-Department -JobTitle $jobTitle -Company $company
-    $tempPass    = New-TempPassword
-
-    Write-Host "Processing: $displayName ($upn)" -ForegroundColor White
-
-    # ── Step 1: Duplicate check ──
-    $exists = Test-UserExists -UPN $upn
-    if ($exists) {
-        Write-Host "  DUPLICATE — $upn already exists. Skipping." -ForegroundColor Yellow
-        $duplicates += [PSCustomObject]@{
-            DisplayName = $displayName
-            UPN         = $upn
-            Reason      = "UPN already exists in tenant"
-        }
-        continue
+if ($toSkip.Count -gt 0) {
+    Write-Host ""
+    Write-Host "The following $($toSkip.Count) user(s) will be SKIPPED (duplicate):" -ForegroundColor Yellow
+    foreach ($u in $toSkip) {
+        Write-Host "  $($u.DisplayName) ($($u.UPN))" -ForegroundColor Yellow
     }
+}
 
-    # ── Step 2: Create user ──
-    $userRecord = [PSCustomObject]@{
-        FirstName   = $firstName
-        LastName    = $lastName
-        DisplayName = $displayName
-        UPN         = $upn
-        JobTitle    = $jobTitle
-        Department  = $department
-        Company     = $company
-        Manager     = $managerRef
-        Password    = $tempPass
-        Status      = "Pending"
-    }
+Write-Host ""
+Write-Host "  Total to create:  $($toCreate.Count)" -ForegroundColor Green
+Write-Host "  Total to skip:    $($toSkip.Count)" -ForegroundColor Yellow
+Write-Host ""
 
-    if ($WhatIf) {
-        Write-Host "  [WhatIf] Would create: $upn | Dept: $department | Title: $jobTitle" -ForegroundColor Cyan
-        $userRecord.Status = "WhatIf"
-        $results += $userRecord
-        continue
-    }
+$finalChoice = Read-Host "CREATE these $($toCreate.Count) users now? [Y]es / [Q]uit"
+if ($finalChoice.ToUpper() -ne "Y") {
+    Write-Host "Aborted. No users were created." -ForegroundColor Yellow
+    Disconnect-MgGraph
+    exit 0
+}
+
+# ==========================================================================
+# PHASE 6: Create Users & Generate Output
+# ==========================================================================
+
+Write-Phase -Number 6 -Title "CREATING USERS"
+Write-Host ""
+
+$results = @()
+$errors  = @()
+
+foreach ($u in $toCreate) {
+    $tempPass = New-TempPassword
+    Write-Host "Creating $($u.UPN)..." -NoNewline
 
     try {
         $newUser = New-MgUser -AccountEnabled:$true \`
-            -DisplayName $displayName \`
-            -GivenName $firstName \`
-            -Surname $lastName \`
-            -UserPrincipalName $upn \`
-            -MailNickname ($upn.Split("@")[0]) \`
-            -JobTitle $jobTitle \`
-            -Department $department \`
-            -CompanyName $company \`
+            -DisplayName $u.DisplayName \`
+            -GivenName $u.FirstName \`
+            -Surname $u.LastName \`
+            -UserPrincipalName $u.UPN \`
+            -MailNickname ($u.UPN.Split("@")[0]) \`
+            -JobTitle $u.JobTitle \`
+            -Department $u.Department \`
+            -CompanyName $u.Company \`
             -UsageLocation "US" \`
             -PasswordProfile @{
                 Password                             = $tempPass
@@ -291,31 +567,30 @@ foreach ($row in $users) {
                 ForceChangePasswordNextSignInWithMfa  = $false
             }
 
-        Write-Host "  CREATED: $upn (ID: $($newUser.Id))" -ForegroundColor Green
+        Write-Host " CREATED" -ForegroundColor Green
 
-        # ── Step 3: Assign manager ──
-        if ($managerRef) {
-            $manager = Get-ManagerByUPN -ManagerInput $managerRef
-            if ($manager) {
-                try {
-                    Set-MgUserManagerByRef -UserId $newUser.Id -BodyParameter @{
-                        "@odata.id" = "https://graph.microsoft.com/v1.0/users/$($manager.Id)"
-                    }
-                    Write-Host "  Manager set: $($manager.DisplayName)" -ForegroundColor Green
+        # Assign manager
+        if ($u.ManagerUPN -and $u.ManagerUPN -notin @("NOT FOUND", "(none)", "")) {
+            try {
+                $mgr = Get-MgUser -Filter "userPrincipalName eq '$($u.ManagerUPN)'" -ErrorAction Stop
+                Set-MgUserManagerByRef -UserId $newUser.Id -BodyParameter @{
+                    "@odata.id" = "https://graph.microsoft.com/v1.0/users/$($mgr.Id)"
                 }
-                catch {
-                    Write-Warning "  Failed to set manager: $($_.Exception.Message)"
-                }
+                Write-Host "  Manager -> $($u.ManagerName)" -ForegroundColor Green
+            }
+            catch {
+                Write-Host "  Manager assignment failed: $($_.Exception.Message)" -ForegroundColor Yellow
             }
         }
 
-        $userRecord.Status = "Created"
-        $results += $userRecord
+        $u.Status = "Created"
+        $u | Add-Member -NotePropertyName "Password" -NotePropertyValue $tempPass -Force
+        $results += $u
     }
     catch {
-        Write-Host "  FAILED: $($_.Exception.Message)" -ForegroundColor Red
-        $userRecord.Status = "Failed"
-        $errors += $userRecord
+        Write-Host " FAILED: $($_.Exception.Message)" -ForegroundColor Red
+        $u.Status = "Failed"
+        $errors += $u
     }
 }
 
@@ -330,11 +605,11 @@ $timestamp = Get-Date -Format "yyyyMMdd_HHmmss"
 
 # A) Master Import CSV
 $masterPath = Join-Path $OutputDir "master_import_\${timestamp}.csv"
-$results | Select-Object UPN, FirstName, LastName, DisplayName, JobTitle, Department, Company, Status |
+$results | Select-Object UPN, FirstName, LastName, DisplayName, JobTitle, Department, Company, Password, Status |
     Export-Csv -Path $masterPath -NoTypeInformation
 Write-Host "  Master CSV:      $masterPath" -ForegroundColor Green
 
-# B) Sales-only CSV
+# B) Sales CSV
 $salesUsers = $results | Where-Object { $_.Department -eq "Sales" }
 if ($salesUsers.Count -gt 0) {
     $salesPath = Join-Path $OutputDir "sales_users_\${timestamp}.csv"
@@ -343,7 +618,7 @@ if ($salesUsers.Count -gt 0) {
     Write-Host "  Sales CSV:       $salesPath ($($salesUsers.Count) users)" -ForegroundColor Green
 }
 
-# C) Operations-only CSV
+# C) Operations CSV
 $opsUsers = $results | Where-Object { $_.Department -eq "Operations" }
 if ($opsUsers.Count -gt 0) {
     $opsPath = Join-Path $OutputDir "operations_users_\${timestamp}.csv"
@@ -353,8 +628,7 @@ if ($opsUsers.Count -gt 0) {
 }
 
 # D) Email Lists
-$allEmails = ($results | Where-Object { $_.Status -ne "Failed" }).UPN
-
+$allEmails = ($results | Where-Object { $_.Status -eq "Created" }).UPN
 $commaList     = $allEmails -join ", "
 $semicolonList = $allEmails -join "; "
 
@@ -369,27 +643,34 @@ $emailPath = Join-Path $OutputDir "email_list_\${timestamp}.txt"
 Write-Host "  Email List:      $emailPath" -ForegroundColor Green
 
 # Duplicates report
-if ($duplicates.Count -gt 0) {
+if ($toSkip.Count -gt 0) {
     $dupPath = Join-Path $OutputDir "duplicates_\${timestamp}.csv"
-    $duplicates | Export-Csv -Path $dupPath -NoTypeInformation
-    Write-Host "  Duplicates:      $dupPath ($($duplicates.Count) skipped)" -ForegroundColor Yellow
+    $toSkip | Select-Object DisplayName, UPN | Export-Csv -Path $dupPath -NoTypeInformation
+    Write-Host "  Duplicates:      $dupPath ($($toSkip.Count) skipped)" -ForegroundColor Yellow
 }
 
-# ── Summary ──────────────────────────────────────────────────────────────────
+# Errors report
+if ($errors.Count -gt 0) {
+    $errPath = Join-Path $OutputDir "errors_\${timestamp}.csv"
+    $errors | Select-Object DisplayName, UPN, Status | Export-Csv -Path $errPath -NoTypeInformation
+    Write-Host "  Errors:          $errPath ($($errors.Count) failed)" -ForegroundColor Red
+}
+
+# ── Final Summary ────────────────────────────────────────────────────────────
 
 Write-Host ""
 Write-Host "=============================================" -ForegroundColor Cyan
-Write-Host " Summary" -ForegroundColor Cyan
+Write-Host " COMPLETE" -ForegroundColor Cyan
 Write-Host "=============================================" -ForegroundColor Cyan
-Write-Host "  Total processed: $($users.Count)" -ForegroundColor White
-Write-Host "  Created:         $($results.Where({ $_.Status -eq 'Created' }).Count)" -ForegroundColor Green
-Write-Host "  Dry run:         $($results.Where({ $_.Status -eq 'WhatIf' }).Count)" -ForegroundColor Cyan
-Write-Host "  Duplicates:      $($duplicates.Count)" -ForegroundColor Yellow
-Write-Host "  Errors:          $($errors.Count)" -ForegroundColor $(if ($errors.Count -gt 0) { "Red" } else { "White" })
+Write-Host "  Created:    $($results.Count)" -ForegroundColor Green
+Write-Host "  Skipped:    $($toSkip.Count)" -ForegroundColor Yellow
+Write-Host "  Failed:     $($errors.Count)" -ForegroundColor $(if ($errors.Count -gt 0) { "Red" } else { "White" })
 Write-Host ""
-Write-Host "  Sales:           $($salesUsers.Count) users" -ForegroundColor White
-Write-Host "  Operations:      $($opsUsers.Count) users" -ForegroundColor White
-Write-Host "  Other:           $(($results | Where-Object { $_.Department -notin @('Sales','Operations') }).Count) users" -ForegroundColor White
+Write-Host "  Sales:      $($salesUsers.Count)" -ForegroundColor White
+Write-Host "  Operations: $($opsUsers.Count)" -ForegroundColor White
+Write-Host "  Other:      $(($results | Where-Object { $_.Department -notin @('Sales','Operations') }).Count)" -ForegroundColor White
+Write-Host ""
+Write-Host "Output files saved to: $OutputDir" -ForegroundColor Cyan
 Write-Host ""
 
 Disconnect-MgGraph
@@ -965,16 +1246,6 @@ Disconnect-MgGraph`,
       sortOrder: 2,
     },
     {
-      id: "param-newuser-whatif",
-      name: "WhatIf",
-      label: "Dry Run (WhatIf)",
-      type: "BOOLEAN" as const,
-      required: false,
-      defaultValue: "true",
-      description: "When true, simulates provisioning without creating users. Set to false to execute.",
-      sortOrder: 3,
-    },
-    {
       id: "param-newuser-temppass",
       name: "DefaultPassword",
       label: "Temporary Password",
@@ -982,7 +1253,7 @@ Disconnect-MgGraph`,
       required: false,
       defaultValue: "",
       description: "Temporary password for new accounts. Leave blank to auto-generate per user.",
-      sortOrder: 4,
+      sortOrder: 3,
     },
   ];
 
