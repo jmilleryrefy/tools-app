@@ -6,6 +6,396 @@ const adapter = new PrismaMariaDb(process.env.DATABASE_URL!);
 
 const prisma = new PrismaClient({ adapter });
 
+// ---------------------------------------------------------------------------
+// New User Provisioning Script
+// ---------------------------------------------------------------------------
+const NEW_USER_PROVISIONING_SCRIPT = `# =============================================================================
+# New User Provisioning - Yrefy / Ignyte / Invessio
+# =============================================================================
+# Requires: Microsoft.Graph PowerShell module
+# Permissions: User.ReadWrite.All, Directory.ReadWrite.All
+#
+# Input CSV columns: FirstName, LastName, Company, JobTitle, Manager
+# Manager column should be the manager's UPN (e.g. ehanna@yrefy.com)
+# =============================================================================
+
+param(
+    [Parameter(Mandatory = $true)]
+    [string]$CsvPath,
+
+    [string]$OutputDir = ".\\\\output",
+
+    [switch]$WhatIf,
+
+    [string]$DefaultPassword = ""
+)
+
+# ── Modules & Connection ─────────────────────────────────────────────────────
+
+if (-not (Get-Module -ListAvailable -Name Microsoft.Graph)) {
+    Write-Error "Microsoft.Graph module is not installed. Run: Install-Module Microsoft.Graph -Scope CurrentUser"
+    exit 1
+}
+
+Connect-MgGraph -Scopes "User.ReadWrite.All", "Directory.ReadWrite.All"
+
+# ── Configuration ────────────────────────────────────────────────────────────
+
+$DomainMap = @{
+    "Yrefy"    = "yrefy.com"
+    "Ignyte"   = "yrefy.com"
+    "Invessio" = "invessio.com"
+}
+
+# Department assignment rules: pattern → department
+$SalesTitlePatterns = @(
+    "Student Loan Advocate"
+)
+
+$OperationsTitlePatterns = @(
+    "Collections",
+    "Negotiator",
+    "Academic",
+    "Client Relationship",
+    "Business Development",
+    "Servicing",
+    "Quality Assurance",
+    "Software"
+)
+
+$EngineeringTitlePatterns = @(
+    "Engineer",
+    "Developer",
+    "DevOps",
+    "Software",
+    "Architect",
+    "SRE"
+)
+
+# ── Helper Functions ─────────────────────────────────────────────────────────
+
+function Get-CleanLastName {
+    param([string]$LastName)
+    # Remove hyphens, spaces, apostrophes, special characters — keep alpha only
+    return ($LastName -replace "[^a-zA-Z]", "").ToLower()
+}
+
+function Get-FirstInitial {
+    param([string]$FirstName)
+    # Handle hyphenated first names (To-Trinh → T), take first alpha char
+    $clean = ($FirstName -replace "[^a-zA-Z]", "")
+    return $clean.Substring(0, 1).ToLower()
+}
+
+function Get-UserPrincipalName {
+    param(
+        [string]$FirstName,
+        [string]$LastName,
+        [string]$Company
+    )
+
+    $initial = Get-FirstInitial -FirstName $FirstName
+    $last    = Get-CleanLastName -LastName $LastName
+    $domain  = $DomainMap[$Company]
+
+    if (-not $domain) {
+        Write-Warning "Unknown company '$Company' — defaulting to yrefy.com"
+        $domain = "yrefy.com"
+    }
+
+    return "\${initial}\${last}@\${domain}"
+}
+
+function Get-Department {
+    param(
+        [string]$JobTitle,
+        [string]$Company
+    )
+
+    # Sales check
+    foreach ($pattern in $SalesTitlePatterns) {
+        if ($JobTitle -match [regex]::Escape($pattern)) {
+            return "Sales"
+        }
+    }
+
+    # Operations check
+    foreach ($pattern in $OperationsTitlePatterns) {
+        if ($JobTitle -match [regex]::Escape($pattern)) {
+            return "Operations"
+        }
+    }
+
+    # Engineering check (Invessio technical roles)
+    if ($Company -eq "Invessio") {
+        foreach ($pattern in $EngineeringTitlePatterns) {
+            if ($JobTitle -match [regex]::Escape($pattern)) {
+                return "Engineering"
+            }
+        }
+    }
+
+    return "General"
+}
+
+function Test-UserExists {
+    param([string]$UPN)
+    try {
+        $existing = Get-MgUser -Filter "userPrincipalName eq '$UPN'" -ErrorAction Stop
+        return ($null -ne $existing -and $existing.Count -gt 0)
+    }
+    catch {
+        return $false
+    }
+}
+
+function Get-ManagerByUPN {
+    param([string]$ManagerInput)
+
+    # If it looks like a UPN (contains @), search directly
+    if ($ManagerInput -match "@") {
+        try {
+            return Get-MgUser -Filter "userPrincipalName eq '$ManagerInput'" -ErrorAction Stop
+        }
+        catch {
+            Write-Warning "  Manager UPN '$ManagerInput' not found"
+            return $null
+        }
+    }
+
+    # Otherwise try display name match
+    try {
+        $result = Get-MgUser -Filter "displayName eq '$ManagerInput'" -ErrorAction Stop
+        if ($result -and $result.Count -eq 1) {
+            return $result
+        }
+        elseif ($result -and $result.Count -gt 1) {
+            Write-Warning "  Multiple users match manager name '$ManagerInput' — skipping manager assignment. Use UPN instead."
+            return $null
+        }
+    }
+    catch { }
+
+    Write-Warning "  Manager '$ManagerInput' not found"
+    return $null
+}
+
+function New-TempPassword {
+    if ($DefaultPassword) { return $DefaultPassword }
+    # Generate 16-char password: upper + lower + digits + symbols
+    return -join ((65..90) + (97..122) + (48..57) + (33, 35, 36, 37, 42) | Get-Random -Count 16 | ForEach-Object { [char]$_ })
+}
+
+# ── Main Processing ──────────────────────────────────────────────────────────
+
+# Validate input
+if (-not (Test-Path $CsvPath)) {
+    Write-Error "CSV file not found: $CsvPath"
+    Disconnect-MgGraph
+    exit 1
+}
+
+$users = Import-Csv -Path $CsvPath
+$requiredColumns = @("FirstName", "LastName", "Company", "JobTitle", "Manager")
+$csvColumns = ($users | Get-Member -MemberType NoteProperty).Name
+foreach ($col in $requiredColumns) {
+    if ($col -notin $csvColumns) {
+        Write-Error "CSV is missing required column: $col"
+        Disconnect-MgGraph
+        exit 1
+    }
+}
+
+# Create output directory
+if (-not (Test-Path $OutputDir)) {
+    New-Item -ItemType Directory -Path $OutputDir -Force | Out-Null
+}
+
+Write-Host "=============================================" -ForegroundColor Cyan
+Write-Host " New User Provisioning" -ForegroundColor Cyan
+Write-Host " Users to process: $($users.Count)" -ForegroundColor Cyan
+if ($WhatIf) {
+    Write-Host " MODE: DRY RUN (no changes will be made)" -ForegroundColor Yellow
+}
+else {
+    Write-Host " MODE: LIVE — users will be created" -ForegroundColor Red
+}
+Write-Host "=============================================" -ForegroundColor Cyan
+Write-Host ""
+
+$results     = @()
+$errors      = @()
+$duplicates  = @()
+
+foreach ($row in $users) {
+    $firstName  = $row.FirstName.Trim()
+    $lastName   = $row.LastName.Trim()
+    $company    = $row.Company.Trim()
+    $jobTitle   = $row.JobTitle.Trim()
+    $managerRef = $row.Manager.Trim()
+
+    $upn         = Get-UserPrincipalName -FirstName $firstName -LastName $lastName -Company $company
+    $displayName = "$firstName $lastName"
+    $department  = Get-Department -JobTitle $jobTitle -Company $company
+    $tempPass    = New-TempPassword
+
+    Write-Host "Processing: $displayName ($upn)" -ForegroundColor White
+
+    # ── Step 1: Duplicate check ──
+    $exists = Test-UserExists -UPN $upn
+    if ($exists) {
+        Write-Host "  DUPLICATE — $upn already exists. Skipping." -ForegroundColor Yellow
+        $duplicates += [PSCustomObject]@{
+            DisplayName = $displayName
+            UPN         = $upn
+            Reason      = "UPN already exists in tenant"
+        }
+        continue
+    }
+
+    # ── Step 2: Create user ──
+    $userRecord = [PSCustomObject]@{
+        FirstName   = $firstName
+        LastName    = $lastName
+        DisplayName = $displayName
+        UPN         = $upn
+        JobTitle    = $jobTitle
+        Department  = $department
+        Company     = $company
+        Manager     = $managerRef
+        Password    = $tempPass
+        Status      = "Pending"
+    }
+
+    if ($WhatIf) {
+        Write-Host "  [WhatIf] Would create: $upn | Dept: $department | Title: $jobTitle" -ForegroundColor Cyan
+        $userRecord.Status = "WhatIf"
+        $results += $userRecord
+        continue
+    }
+
+    try {
+        $newUser = New-MgUser -AccountEnabled:$true \`
+            -DisplayName $displayName \`
+            -GivenName $firstName \`
+            -Surname $lastName \`
+            -UserPrincipalName $upn \`
+            -MailNickname ($upn.Split("@")[0]) \`
+            -JobTitle $jobTitle \`
+            -Department $department \`
+            -CompanyName $company \`
+            -UsageLocation "US" \`
+            -PasswordProfile @{
+                Password                             = $tempPass
+                ForceChangePasswordNextSignIn         = $true
+                ForceChangePasswordNextSignInWithMfa  = $false
+            }
+
+        Write-Host "  CREATED: $upn (ID: $($newUser.Id))" -ForegroundColor Green
+
+        # ── Step 3: Assign manager ──
+        if ($managerRef) {
+            $manager = Get-ManagerByUPN -ManagerInput $managerRef
+            if ($manager) {
+                try {
+                    Set-MgUserManagerByRef -UserId $newUser.Id -BodyParameter @{
+                        "@odata.id" = "https://graph.microsoft.com/v1.0/users/$($manager.Id)"
+                    }
+                    Write-Host "  Manager set: $($manager.DisplayName)" -ForegroundColor Green
+                }
+                catch {
+                    Write-Warning "  Failed to set manager: $($_.Exception.Message)"
+                }
+            }
+        }
+
+        $userRecord.Status = "Created"
+        $results += $userRecord
+    }
+    catch {
+        Write-Host "  FAILED: $($_.Exception.Message)" -ForegroundColor Red
+        $userRecord.Status = "Failed"
+        $errors += $userRecord
+    }
+}
+
+# ── Generate Output Files ────────────────────────────────────────────────────
+
+Write-Host ""
+Write-Host "=============================================" -ForegroundColor Cyan
+Write-Host " Generating Output Files" -ForegroundColor Cyan
+Write-Host "=============================================" -ForegroundColor Cyan
+
+$timestamp = Get-Date -Format "yyyyMMdd_HHmmss"
+
+# A) Master Import CSV
+$masterPath = Join-Path $OutputDir "master_import_\${timestamp}.csv"
+$results | Select-Object UPN, FirstName, LastName, DisplayName, JobTitle, Department, Company, Status |
+    Export-Csv -Path $masterPath -NoTypeInformation
+Write-Host "  Master CSV:      $masterPath" -ForegroundColor Green
+
+# B) Sales-only CSV
+$salesUsers = $results | Where-Object { $_.Department -eq "Sales" }
+if ($salesUsers.Count -gt 0) {
+    $salesPath = Join-Path $OutputDir "sales_users_\${timestamp}.csv"
+    $salesUsers | Select-Object UPN, FirstName, LastName, DisplayName, JobTitle |
+        Export-Csv -Path $salesPath -NoTypeInformation
+    Write-Host "  Sales CSV:       $salesPath ($($salesUsers.Count) users)" -ForegroundColor Green
+}
+
+# C) Operations-only CSV
+$opsUsers = $results | Where-Object { $_.Department -eq "Operations" }
+if ($opsUsers.Count -gt 0) {
+    $opsPath = Join-Path $OutputDir "operations_users_\${timestamp}.csv"
+    $opsUsers | Select-Object UPN, FirstName, LastName, DisplayName, JobTitle |
+        Export-Csv -Path $opsPath -NoTypeInformation
+    Write-Host "  Operations CSV:  $opsPath ($($opsUsers.Count) users)" -ForegroundColor Green
+}
+
+# D) Email Lists
+$allEmails = ($results | Where-Object { $_.Status -ne "Failed" }).UPN
+
+$commaList     = $allEmails -join ", "
+$semicolonList = $allEmails -join "; "
+
+$emailPath = Join-Path $OutputDir "email_list_\${timestamp}.txt"
+@(
+    "=== Comma-separated ==="
+    $commaList
+    ""
+    "=== Semicolon-separated ==="
+    $semicolonList
+) | Out-File -FilePath $emailPath -Encoding UTF8
+Write-Host "  Email List:      $emailPath" -ForegroundColor Green
+
+# Duplicates report
+if ($duplicates.Count -gt 0) {
+    $dupPath = Join-Path $OutputDir "duplicates_\${timestamp}.csv"
+    $duplicates | Export-Csv -Path $dupPath -NoTypeInformation
+    Write-Host "  Duplicates:      $dupPath ($($duplicates.Count) skipped)" -ForegroundColor Yellow
+}
+
+# ── Summary ──────────────────────────────────────────────────────────────────
+
+Write-Host ""
+Write-Host "=============================================" -ForegroundColor Cyan
+Write-Host " Summary" -ForegroundColor Cyan
+Write-Host "=============================================" -ForegroundColor Cyan
+Write-Host "  Total processed: $($users.Count)" -ForegroundColor White
+Write-Host "  Created:         $($results.Where({ $_.Status -eq 'Created' }).Count)" -ForegroundColor Green
+Write-Host "  Dry run:         $($results.Where({ $_.Status -eq 'WhatIf' }).Count)" -ForegroundColor Cyan
+Write-Host "  Duplicates:      $($duplicates.Count)" -ForegroundColor Yellow
+Write-Host "  Errors:          $($errors.Count)" -ForegroundColor $(if ($errors.Count -gt 0) { "Red" } else { "White" })
+Write-Host ""
+Write-Host "  Sales:           $($salesUsers.Count) users" -ForegroundColor White
+Write-Host "  Operations:      $($opsUsers.Count) users" -ForegroundColor White
+Write-Host "  Other:           $(($results | Where-Object { $_.Department -notin @('Sales','Operations') }).Count) users" -ForegroundColor White
+Write-Host ""
+
+Disconnect-MgGraph
+Write-Host "Done." -ForegroundColor Green
+`;
+
 async function main() {
   console.log("Seeding database...");
 
@@ -65,6 +455,17 @@ async function main() {
     },
   });
 
+  const provisioning = await prisma.category.upsert({
+    where: { name: "User Provisioning" },
+    update: {},
+    create: {
+      name: "User Provisioning",
+      description: "New hire onboarding, user creation, and provisioning automation",
+      icon: "UserPlus",
+      sortOrder: 6,
+    },
+  });
+
   const reporting = await prisma.category.upsert({
     where: { name: "Reporting" },
     update: {},
@@ -72,7 +473,7 @@ async function main() {
       name: "Reporting",
       description: "Tenant-wide reporting and analytics scripts",
       icon: "BarChart",
-      sortOrder: 6,
+      sortOrder: 7,
     },
   });
 
@@ -522,9 +923,83 @@ Disconnect-MgGraph`,
     },
   });
 
+  // --- User Provisioning Scripts ---
+
+  const newUserScript = await prisma.script.upsert({
+    where: { slug: "new-user-provisioning" },
+    update: {
+      content: NEW_USER_PROVISIONING_SCRIPT,
+      description: "Automated new hire provisioning: creates M365 users from CSV input with UPN generation, department assignment, duplicate checking, manager assignment, and generates output reports (master CSV, sales CSV, operations CSV, email lists).",
+    },
+    create: {
+      name: "New User Provisioning",
+      slug: "new-user-provisioning",
+      description: "Automated new hire provisioning: creates M365 users from CSV input with UPN generation, department assignment, duplicate checking, manager assignment, and generates output reports (master CSV, sales CSV, operations CSV, email lists).",
+      categoryId: provisioning.id,
+      tags: "onboarding,new-hire,provisioning,csv,bulk",
+      requiresAdmin: true,
+      content: NEW_USER_PROVISIONING_SCRIPT,
+    },
+  });
+
+  // Parameters for New User Provisioning
+  const newUserParams = [
+    {
+      id: "param-newuser-csv",
+      name: "CsvPath",
+      label: "Input CSV Path",
+      type: "STRING" as const,
+      required: true,
+      defaultValue: "",
+      description: "Path to CSV with columns: FirstName, LastName, Company, JobTitle, Manager (UPN or display name)",
+      sortOrder: 1,
+    },
+    {
+      id: "param-newuser-output",
+      name: "OutputDir",
+      label: "Output Directory",
+      type: "STRING" as const,
+      required: false,
+      defaultValue: ".\\\\output",
+      description: "Directory for generated output files (master CSV, department CSVs, email lists)",
+      sortOrder: 2,
+    },
+    {
+      id: "param-newuser-whatif",
+      name: "WhatIf",
+      label: "Dry Run (WhatIf)",
+      type: "BOOLEAN" as const,
+      required: false,
+      defaultValue: "true",
+      description: "When true, simulates provisioning without creating users. Set to false to execute.",
+      sortOrder: 3,
+    },
+    {
+      id: "param-newuser-temppass",
+      name: "DefaultPassword",
+      label: "Temporary Password",
+      type: "STRING" as const,
+      required: false,
+      defaultValue: "",
+      description: "Temporary password for new accounts. Leave blank to auto-generate per user.",
+      sortOrder: 4,
+    },
+  ];
+
+  for (const param of newUserParams) {
+    await prisma.scriptParameter.upsert({
+      where: { id: param.id },
+      update: {},
+      create: {
+        ...param,
+        scriptId: newUserScript.id,
+      },
+    });
+  }
+
   console.log("Seed completed successfully!");
-  console.log("  Categories: 6");
-  console.log("  Scripts: 10");
+  console.log("  Categories: 7");
+  console.log("  Scripts: 11");
 }
 
 main()
