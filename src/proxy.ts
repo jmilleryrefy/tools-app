@@ -1,10 +1,10 @@
 import NextAuth from "next-auth";
 import { authConfig } from "@/auth.config";
 
-// Use the edge-safe config (no Prisma) for middleware
+// Use the edge-safe config (no Prisma) for proxy
 const { auth } = NextAuth(authConfig);
 
-export default auth;
+export const proxy = auth;
 
 export const config = {
   matcher: [
