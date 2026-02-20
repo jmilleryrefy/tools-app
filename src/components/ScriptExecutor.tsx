@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useState, useRef } from "react";
 import { Play, Loader2, CheckCircle, XCircle } from "lucide-react";
 
 interface Parameter {
@@ -33,6 +33,7 @@ export default function ScriptExecutor({
   const [status, setStatus] = useState<
     "idle" | "running" | "success" | "error"
   >("idle");
+  const outputRef = useRef<HTMLPreElement>(null);
 
   const handleExecute = async () => {
     setStatus("running");
@@ -45,16 +46,65 @@ export default function ScriptExecutor({
         body: JSON.stringify({ scriptId, params }),
       });
 
-      const data = await res.json();
-
       if (!res.ok) {
+        const data = await res.json();
         setStatus("error");
         setOutput(data.error || "Execution failed");
         return;
       }
 
-      setStatus(data.status === "SUCCESS" ? "success" : "error");
-      setOutput(data.output || data.error || "No output");
+      if (!res.body) {
+        setStatus("error");
+        setOutput("No response stream available");
+        return;
+      }
+
+      const reader = res.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = "";
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+
+        buffer += decoder.decode(value, { stream: true });
+
+        // Parse SSE events from buffer
+        const lines = buffer.split("\n");
+        // Keep the last potentially incomplete line in the buffer
+        buffer = lines.pop() || "";
+
+        let currentEvent = "";
+        for (const line of lines) {
+          if (line.startsWith("event: ")) {
+            currentEvent = line.slice(7);
+          } else if (line.startsWith("data: ")) {
+            const data = JSON.parse(line.slice(6));
+
+            switch (currentEvent) {
+              case "stdout":
+              case "stderr":
+                setOutput((prev) => prev + data);
+                // Auto-scroll to bottom
+                if (outputRef.current) {
+                  requestAnimationFrame(() => {
+                    if (outputRef.current) {
+                      outputRef.current.scrollTop = outputRef.current.scrollHeight;
+                    }
+                  });
+                }
+                break;
+              case "error":
+                setOutput((prev) => prev + "\nERROR: " + data);
+                break;
+              case "done":
+                setStatus(data === "SUCCESS" ? "success" : "error");
+                break;
+            }
+            currentEvent = "";
+          }
+        }
+      }
     } catch {
       setStatus("error");
       setOutput("Failed to connect to execution API");
@@ -134,22 +184,37 @@ export default function ScriptExecutor({
       </button>
 
       {/* Output */}
-      {output && (
+      {(output || status === "running") && (
         <div className="bg-gray-900 border border-gray-800 rounded-xl overflow-hidden">
           <div className="flex items-center gap-2 px-4 py-2 border-b border-gray-800 bg-gray-900/50">
-            {status === "success" ? (
+            {status === "running" ? (
+              <Loader2 className="h-4 w-4 text-blue-400 animate-spin" />
+            ) : status === "success" ? (
               <CheckCircle className="h-4 w-4 text-green-400" />
             ) : (
               <XCircle className="h-4 w-4 text-red-400" />
             )}
             <span
-              className={`text-sm font-medium ${status === "success" ? "text-green-400" : "text-red-400"}`}
+              className={`text-sm font-medium ${
+                status === "running"
+                  ? "text-blue-400"
+                  : status === "success"
+                    ? "text-green-400"
+                    : "text-red-400"
+              }`}
             >
-              {status === "success" ? "Execution Succeeded" : "Execution Failed"}
+              {status === "running"
+                ? "Running..."
+                : status === "success"
+                  ? "Execution Succeeded"
+                  : "Execution Failed"}
             </span>
           </div>
-          <pre className="p-4 text-sm text-gray-300 overflow-x-auto whitespace-pre-wrap font-mono max-h-96 overflow-y-auto">
-            {output}
+          <pre
+            ref={outputRef}
+            className="p-4 text-sm text-gray-300 overflow-x-auto whitespace-pre-wrap font-mono max-h-96 overflow-y-auto"
+          >
+            {output || "Waiting for output..."}
           </pre>
         </div>
       )}
