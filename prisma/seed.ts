@@ -15,15 +15,35 @@ const NEW_USER_PROVISIONING_SCRIPT = `# ========================================
 # Interactive phase-based provisioning with review at each step.
 # Each phase displays results and lets you edit before proceeding.
 #
+# Input modes:
+#   - Pass -CsvPath to import directly from a CSV file
+#   - Run without parameters for an interactive menu:
+#     [T] Export a blank CSV template to fill out
+#     [C] Import from a completed CSV file
+#     [M] Manual entry - type names and set details interactively
+#
+# Phases:
+#   1. UPN / Email Generation
+#   2. Department Assignments
+#   3. License Assignment Review (auto-mapped from role/company rules)
+#   4. Duplicate Check
+#   5. Manager Lookup
+#   6. Final Review
+#   7. Create Users, Assign Licenses & Generate Output
+#
+# License Rules (employees only - contractors are not handled by this script):
+#   Yrefy/Ignyte SLA        -> Business Premium + Intune Suite
+#   Yrefy/Ignyte Other      -> M365 E5
+#   Invessio Employee       -> M365 E5
+#
 # Requires: Microsoft.Graph PowerShell module
-# Permissions: User.ReadWrite.All, Directory.ReadWrite.All
+# Permissions: User.ReadWrite.All, Directory.ReadWrite.All, Organization.Read.All
 #
 # Input CSV columns: FirstName, LastName, Company, JobTitle, Manager
 # =============================================================================
 
 param(
-    [Parameter(Mandatory = $true)]
-    [string]$CsvPath,
+    [string]$CsvPath = "",
 
     [string]$OutputDir = ".\\\\output",
 
@@ -37,7 +57,7 @@ if (-not (Get-Module -ListAvailable -Name Microsoft.Graph)) {
     exit 1
 }
 
-Connect-MgGraph -Scopes "User.ReadWrite.All", "Directory.ReadWrite.All" -UseDeviceCode
+Connect-MgGraph -Scopes "User.ReadWrite.All", "Directory.ReadWrite.All", "Organization.Read.All" -UseDeviceCode
 
 # ── Configuration ────────────────────────────────────────────────────────────
 
@@ -46,6 +66,13 @@ $DomainMap = @{
     "Ignyte"   = "yrefy.com"
     "Invessio" = "invessio.com"
 }
+
+$AvailableDomains = @("yrefy.com", "invessio.com", "investyrefy.com")
+
+$InvestorRelationsTitlePatterns = @(
+    "Investor Relations",
+    "Investor"
+)
 
 $SalesTitlePatterns = @(
     "Student Loan Advocate"
@@ -69,6 +96,45 @@ $EngineeringTitlePatterns = @(
     "Software",
     "Architect",
     "SRE"
+)
+
+# ── License Configuration ────────────────────────────────────────────────
+# Maps SKU part-number strings to friendly names used throughout the script.
+# The actual SKU IDs (GUIDs) are resolved dynamically from the tenant.
+
+$LicenseSkuNames = @{
+    "SPE_E5"               = "M365 E5"
+    "SPB"                  = "Business Premium"
+    "INTUNE_A"             = "Intune Suite"
+    "ENTERPRISEPACK"       = "Teams Enterprise"         # fallback if E5 bundles differ
+    "VISIOCLIENT"          = "Visio Plan 2"             # placeholder for add-on pattern
+}
+
+# Yrefy license rules (by job-title pattern and department)
+# Each rule returns: @{ Primary = "<SkuPartNumber>"; AddOns = @("<SkuPartNumber>", ...) }
+
+$YrefyLicenseRules = @(
+    @{
+        Label       = "Student Loan Advocate (SLA)"
+        Match       = { param($jt, $dept) $jt -match "Student Loan Advocate" }
+        Primary     = "SPB"          # Business Premium
+        AddOns      = @("INTUNE_A")  # Intune Suite + Advanced Security (bundled in BP add-ons)
+    },
+    @{
+        Label       = "SL Support / Operations / Compliance / Investor Relations"
+        Match       = { param($jt, $dept) $dept -in @("Operations", "Sales", "General") -and $jt -notmatch "Student Loan Advocate" }
+        Primary     = "SPE_E5"       # M365 E5
+        AddOns      = @()            # Teams Enterprise is included in E5
+    }
+)
+
+$InvessioLicenseRules = @(
+    @{
+        Label       = "Invessio Employee (hired by Yrefy)"
+        Match       = { param($jt, $dept) $true }    # all non-contractor Invessio users
+        Primary     = "SPE_E5"       # M365 E5
+        AddOns      = @()            # Teams Enterprise + VS Enterprise handled outside M365
+    }
 )
 
 # ── Helper Functions ─────────────────────────────────────────────────────────
@@ -108,6 +174,35 @@ function Edit-UserField {
     return $Users
 }
 
+function Get-LicenseAssignment {
+    param(
+        [string]$Company,
+        [string]$JobTitle,
+        [string]$Department
+    )
+    $rules = switch ($Company) {
+        "Yrefy"    { $YrefyLicenseRules }
+        "Ignyte"   { $YrefyLicenseRules }   # Ignyte follows Yrefy licensing
+        "Invessio" { $InvessioLicenseRules }
+        default    { @() }
+    }
+    foreach ($rule in $rules) {
+        if (& $rule.Match $JobTitle $Department) {
+            return @{
+                Primary    = $rule.Primary
+                AddOns     = $rule.AddOns
+                RuleLabel  = $rule.Label
+            }
+        }
+    }
+    # Fallback - no matching rule
+    return @{
+        Primary    = ""
+        AddOns     = @()
+        RuleLabel  = "No matching rule"
+    }
+}
+
 function Get-CleanLastName {
     param([string]$LastName)
     return ($LastName -replace "[^a-zA-Z]", "").ToLower()
@@ -120,13 +215,27 @@ function Get-FirstInitial {
 }
 
 function Get-UserPrincipalName {
-    param([string]$FirstName, [string]$LastName, [string]$Company)
+    param([string]$FirstName, [string]$LastName, [string]$Company, [string]$JobTitle = "")
     $initial = Get-FirstInitial -FirstName $FirstName
     $last    = Get-CleanLastName -LastName $LastName
     $domain  = $DomainMap[$Company]
     if (-not $domain) {
         Write-Warning "Unknown company '$Company' - defaulting to yrefy.com"
         $domain = "yrefy.com"
+    }
+    # Engineers (any company) get the invessio.com domain
+    foreach ($pattern in $EngineeringTitlePatterns) {
+        if ($JobTitle -match [regex]::Escape($pattern)) {
+            $domain = "invessio.com"
+            break
+        }
+    }
+    # Investor Relations get the investyrefy.com domain
+    foreach ($pattern in $InvestorRelationsTitlePatterns) {
+        if ($JobTitle -match [regex]::Escape($pattern)) {
+            $domain = "investyrefy.com"
+            break
+        }
     }
     return "\${initial}\${last}@\${domain}"
 }
@@ -177,36 +286,218 @@ function New-TempPassword {
     return -join ((65..90) + (97..122) + (48..57) + (33,35,36,37,42) | Get-Random -Count 16 | ForEach-Object { [char]$_ })
 }
 
-# ── Validate Input ───────────────────────────────────────────────────────────
-
-if (-not (Test-Path $CsvPath)) {
-    Write-Error "CSV file not found: $CsvPath"
-    Disconnect-MgGraph
-    exit 1
-}
-
-$csvUsers = Import-Csv -Path $CsvPath
-$requiredColumns = @("FirstName", "LastName", "Company", "JobTitle", "Manager")
-$csvColumns = ($csvUsers | Get-Member -MemberType NoteProperty).Name
-foreach ($col in $requiredColumns) {
-    if ($col -notin $csvColumns) {
-        Write-Error "CSV is missing required column: $col"
-        Disconnect-MgGraph
-        exit 1
-    }
-}
+# ── Validate Output Directory ────────────────────────────────────────────────
 
 if (-not (Test-Path $OutputDir)) {
     New-Item -ItemType Directory -Path $OutputDir -Force | Out-Null
 }
 
-Write-Host ""
-Write-Host "=============================================" -ForegroundColor Cyan
-Write-Host " New User Provisioning (Interactive)" -ForegroundColor Cyan
-Write-Host " Users in CSV: $($csvUsers.Count)" -ForegroundColor Cyan
-Write-Host "=============================================" -ForegroundColor Cyan
+# ── Input: CSV, Manual Entry, or Export Template ─────────────────────────────
 
-# Build working array with all computed fields
+$csvUsers = @()
+
+if ($CsvPath -and $CsvPath -ne "") {
+    # CSV path provided as parameter - go straight to import
+    if (-not (Test-Path $CsvPath)) {
+        Write-Error "CSV file not found: $CsvPath"
+        Disconnect-MgGraph
+        exit 1
+    }
+    $csvUsers = Import-Csv -Path $CsvPath
+    $requiredColumns = @("FirstName", "LastName", "Company", "JobTitle", "Manager")
+    $csvColumns = ($csvUsers | Get-Member -MemberType NoteProperty).Name
+    foreach ($col in $requiredColumns) {
+        if ($col -notin $csvColumns) {
+            Write-Error "CSV is missing required column: $col"
+            Disconnect-MgGraph
+            exit 1
+        }
+    }
+
+    Write-Host ""
+    Write-Host "=============================================" -ForegroundColor Cyan
+    Write-Host " New User Provisioning (Interactive)" -ForegroundColor Cyan
+    Write-Host " Source: CSV ($($csvUsers.Count) users)" -ForegroundColor Cyan
+    Write-Host "=============================================" -ForegroundColor Cyan
+}
+else {
+    # No CSV provided - show input mode menu
+    Write-Host ""
+    Write-Host "=============================================" -ForegroundColor Cyan
+    Write-Host " New User Provisioning" -ForegroundColor Cyan
+    Write-Host "=============================================" -ForegroundColor Cyan
+    Write-Host ""
+    Write-Host "  How would you like to add users?" -ForegroundColor White
+    Write-Host ""
+    Write-Host "  [T] Export CSV template   - Save a blank CSV template to fill out" -ForegroundColor Gray
+    Write-Host "  [C] Import from CSV       - Load users from a completed CSV file" -ForegroundColor Gray
+    Write-Host "  [M] Manual entry          - Type in names and details interactively" -ForegroundColor Gray
+    Write-Host "  [Q] Quit" -ForegroundColor Gray
+    Write-Host ""
+    $inputMode = (Read-Host "Select an option").ToUpper()
+
+    switch ($inputMode) {
+        "T" {
+            # Export CSV template
+            $templatePath = Join-Path $OutputDir "new_user_template.csv"
+            $templateHeader = "FirstName,LastName,Company,JobTitle,Manager"
+            $templateExamples = @(
+                "FirstName,LastName,Company,JobTitle,Manager"
+                "Jane,Doe,Yrefy,Student Loan Advocate,jsmith@yrefy.com"
+                "John,Smith,Invessio,Software Engineer,mjones@invessio.com"
+                "Alice,Johnson,Yrefy,Investor Relations Analyst,jsmith@yrefy.com"
+            )
+            $templateExamples | Out-File -FilePath $templatePath -Encoding UTF8
+            Write-Host ""
+            Write-Host "CSV template exported to: $templatePath" -ForegroundColor Green
+            Write-Host ""
+            Write-Host "Columns:" -ForegroundColor Cyan
+            Write-Host "  FirstName  - Employee first name" -ForegroundColor Gray
+            Write-Host "  LastName   - Employee last name" -ForegroundColor Gray
+            Write-Host "  Company    - Yrefy, Ignyte, or Invessio" -ForegroundColor Gray
+            Write-Host "  JobTitle   - Full job title (used for domain, department, and license rules)" -ForegroundColor Gray
+            Write-Host "  Manager    - Manager display name or UPN (e.g. jdoe@yrefy.com)" -ForegroundColor Gray
+            Write-Host ""
+            Write-Host "Fill out the template, then re-run with:" -ForegroundColor White
+            Write-Host "  .\\New-UserProvisioning.ps1 -CsvPath \`"$templatePath\`"" -ForegroundColor Yellow
+            Write-Host ""
+            Write-Host "Or re-run without parameters and choose [C] to import." -ForegroundColor White
+            Disconnect-MgGraph
+            exit 0
+        }
+        "C" {
+            # Import from CSV (prompt for path)
+            $CsvPath = Read-Host "Enter path to CSV file"
+            if (-not $CsvPath -or $CsvPath.Trim() -eq "") {
+                Write-Host "No path provided. Exiting." -ForegroundColor Yellow
+                Disconnect-MgGraph
+                exit 0
+            }
+            $CsvPath = $CsvPath.Trim().Trim('"').Trim("'")
+            if (-not (Test-Path $CsvPath)) {
+                Write-Error "CSV file not found: $CsvPath"
+                Disconnect-MgGraph
+                exit 1
+            }
+            $csvUsers = Import-Csv -Path $CsvPath
+            $requiredColumns = @("FirstName", "LastName", "Company", "JobTitle", "Manager")
+            $csvColumns = ($csvUsers | Get-Member -MemberType NoteProperty).Name
+            foreach ($col in $requiredColumns) {
+                if ($col -notin $csvColumns) {
+                    Write-Error "CSV is missing required column: $col"
+                    Disconnect-MgGraph
+                    exit 1
+                }
+            }
+
+            Write-Host ""
+            Write-Host "=============================================" -ForegroundColor Cyan
+            Write-Host " New User Provisioning (Interactive)" -ForegroundColor Cyan
+            Write-Host " Source: CSV ($($csvUsers.Count) users)" -ForegroundColor Cyan
+            Write-Host "=============================================" -ForegroundColor Cyan
+        }
+        "M" {
+            # Manual entry mode
+            Write-Host ""
+            Write-Host "Enter names, one per line (FirstName LastName)." -ForegroundColor White
+            Write-Host "Press Enter on a blank line when done." -ForegroundColor Gray
+            Write-Host ""
+
+            $nameList = [System.Collections.ArrayList]@()
+            $nameIndex = 1
+            while ($true) {
+                $nameInput = Read-Host "  [$nameIndex] Name (or blank to finish)"
+                if (-not $nameInput -or $nameInput.Trim() -eq "") { break }
+                $parts = $nameInput.Trim() -split "\\s+", 2
+                if ($parts.Count -lt 2) {
+                    Write-Host "    Please enter both first and last name." -ForegroundColor Red
+                    continue
+                }
+                [void]$nameList.Add(@{ FirstName = $parts[0]; LastName = $parts[1] })
+                $nameIndex++
+            }
+
+            if ($nameList.Count -eq 0) {
+                Write-Host "No names entered. Exiting." -ForegroundColor Yellow
+                Disconnect-MgGraph
+                exit 0
+            }
+
+            Write-Host ""
+            Write-Host "$($nameList.Count) user(s) entered. Now set details for each." -ForegroundColor Cyan
+            Write-Host ""
+
+            # Ask for defaults to speed up entry
+            Write-Host "── Set Defaults (press Enter to skip) ─────────────────" -ForegroundColor Cyan
+            Write-Host "  These will pre-fill for every user. You can override per user." -ForegroundColor Gray
+            Write-Host ""
+            Write-Host "  Companies: Yrefy, Ignyte, Invessio"
+            $defaultCompany  = Read-Host "  Default Company"
+            $defaultJobTitle = Read-Host "  Default Job Title"
+            $defaultManager  = Read-Host "  Default Manager (display name or UPN)"
+            Write-Host ""
+
+            $manualUsers = [System.Collections.ArrayList]@()
+            foreach ($entry in $nameList) {
+                Write-Host "── $($entry.FirstName) $($entry.LastName) ──────────────────────────" -ForegroundColor White
+
+                # Company
+                if ($defaultCompany) {
+                    $coInput = Read-Host "  Company [$defaultCompany]"
+                    $co = if ($coInput -and $coInput.Trim() -ne "") { $coInput.Trim() } else { $defaultCompany.Trim() }
+                }
+                else {
+                    $co = (Read-Host "  Company (Yrefy/Ignyte/Invessio)").Trim()
+                    while ($co -eq "") {
+                        Write-Host "    Company is required." -ForegroundColor Red
+                        $co = (Read-Host "  Company (Yrefy/Ignyte/Invessio)").Trim()
+                    }
+                }
+
+                # Job Title
+                if ($defaultJobTitle) {
+                    $jtInput = Read-Host "  Job Title [$defaultJobTitle]"
+                    $jt = if ($jtInput -and $jtInput.Trim() -ne "") { $jtInput.Trim() } else { $defaultJobTitle.Trim() }
+                }
+                else {
+                    $jt = (Read-Host "  Job Title").Trim()
+                }
+
+                # Manager
+                if ($defaultManager) {
+                    $mgInput = Read-Host "  Manager [$defaultManager]"
+                    $mg = if ($mgInput -and $mgInput.Trim() -ne "") { $mgInput.Trim() } else { $defaultManager.Trim() }
+                }
+                else {
+                    $mg = (Read-Host "  Manager (display name or UPN)").Trim()
+                }
+
+                [void]$manualUsers.Add([PSCustomObject]@{
+                    FirstName = $entry.FirstName
+                    LastName  = $entry.LastName
+                    Company   = $co
+                    JobTitle  = $jt
+                    Manager   = $mg
+                })
+                Write-Host ""
+            }
+
+            $csvUsers = $manualUsers
+
+            Write-Host "=============================================" -ForegroundColor Cyan
+            Write-Host " $($csvUsers.Count) user(s) ready for provisioning" -ForegroundColor Cyan
+            Write-Host "=============================================" -ForegroundColor Cyan
+        }
+        default {
+            Write-Host "Exiting." -ForegroundColor Yellow
+            Disconnect-MgGraph
+            exit 0
+        }
+    }
+}
+
+# ── Build Working Roster ─────────────────────────────────────────────────────
+
 $roster = [System.Collections.ArrayList]@()
 foreach ($row in $csvUsers) {
     $fn = $row.FirstName.Trim()
@@ -214,20 +505,25 @@ foreach ($row in $csvUsers) {
     $co = $row.Company.Trim()
     $jt = $row.JobTitle.Trim()
     $mg = $row.Manager.Trim()
+    $dept = Get-Department -JobTitle $jt -Company $co
+    $lic  = Get-LicenseAssignment -Company $co -JobTitle $jt -Department $dept
     [void]$roster.Add([PSCustomObject]@{
-        Row         = $roster.Count + 1
-        FirstName   = $fn
-        LastName    = $ln
-        Company     = $co
-        JobTitle    = $jt
-        Manager     = $mg
-        UPN         = Get-UserPrincipalName -FirstName $fn -LastName $ln -Company $co
-        DisplayName = "$fn $ln"
-        Department  = Get-Department -JobTitle $jt -Company $co
-        Duplicate   = $false
-        ManagerUPN  = ""
-        ManagerName = ""
-        Status      = "Pending"
+        Row            = $roster.Count + 1
+        FirstName      = $fn
+        LastName       = $ln
+        Company        = $co
+        JobTitle       = $jt
+        Manager        = $mg
+        UPN            = Get-UserPrincipalName -FirstName $fn -LastName $ln -Company $co -JobTitle $jt
+        DisplayName    = "$fn $ln"
+        Department     = $dept
+        LicensePrimary = $lic.Primary
+        LicenseAddOns  = $lic.AddOns
+        LicenseLabel   = $lic.RuleLabel
+        Duplicate      = $false
+        ManagerUPN     = ""
+        ManagerName    = ""
+        Status         = "Pending"
     })
 }
 
@@ -250,9 +546,45 @@ while (-not $phase1Done) {
     switch ($choice) {
         "Y" { $phase1Done = $true }
         "E" {
-            $field = Read-Host "Edit which field? [U]PN / [F]irstName / [L]astName / [C]ompany"
+            $field = Read-Host "Edit which field? [U]PN / [D]omain / [F]irstName / [L]astName / [C]ompany"
             switch ($field.ToUpper()) {
                 "U" { $roster = Edit-UserField -Users $roster -FieldName "UPN" }
+                "D" {
+                    $rowNum = Read-Host "Enter row number to change domain (1-$($roster.Count))"
+                    $idx = [int]$rowNum - 1
+                    if ($idx -ge 0 -and $idx -lt $roster.Count) {
+                        $r = $roster[$idx]
+                        $currentDomain = $r.UPN.Split("@")[1]
+                        Write-Host "Current: $($r.DisplayName) -> $($r.UPN)" -ForegroundColor White
+                        Write-Host "Available domains:"
+                        for ($i = 0; $i -lt $AvailableDomains.Count; $i++) {
+                            $marker = if ($AvailableDomains[$i] -eq $currentDomain) { " (current)" } else { "" }
+                            Write-Host "  [$($i + 1)] $($AvailableDomains[$i])$marker"
+                        }
+                        $domainChoice = Read-Host "Select domain number, or type a custom domain"
+                        $newDomain = ""
+                        if ($domainChoice -match "^\\d+$" -and [int]$domainChoice -ge 1 -and [int]$domainChoice -le $AvailableDomains.Count) {
+                            $newDomain = $AvailableDomains[[int]$domainChoice - 1]
+                        }
+                        elseif ($domainChoice -match "\\.") {
+                            $newDomain = $domainChoice
+                        }
+                        if ($newDomain -and $newDomain -ne $currentDomain) {
+                            $localPart = $r.UPN.Split("@")[0]
+                            $r.UPN = "\${localPart}@\${newDomain}"
+                            Write-Host "Updated: $($r.DisplayName) -> $($r.UPN)" -ForegroundColor Green
+                        }
+                        elseif ($newDomain -eq $currentDomain) {
+                            Write-Host "Domain unchanged." -ForegroundColor Gray
+                        }
+                        else {
+                            Write-Host "Invalid selection." -ForegroundColor Red
+                        }
+                    }
+                    else {
+                        Write-Host "Invalid row number." -ForegroundColor Red
+                    }
+                }
                 "F" {
                     $roster = Edit-UserField -Users $roster -FieldName "FirstName"
                     # Regenerate UPN and DisplayName for edited row
@@ -260,7 +592,7 @@ while (-not $phase1Done) {
                     if ($rowNum -eq "Y") {
                         $idx = [int](Read-Host "Row number") - 1
                         $r = $roster[$idx]
-                        $r.UPN = Get-UserPrincipalName -FirstName $r.FirstName -LastName $r.LastName -Company $r.Company
+                        $r.UPN = Get-UserPrincipalName -FirstName $r.FirstName -LastName $r.LastName -Company $r.Company -JobTitle $r.JobTitle
                         $r.DisplayName = "$($r.FirstName) $($r.LastName)"
                         Write-Host "Regenerated: $($r.UPN)" -ForegroundColor Green
                     }
@@ -271,7 +603,7 @@ while (-not $phase1Done) {
                     if ($rowNum -eq "Y") {
                         $idx = [int](Read-Host "Row number") - 1
                         $r = $roster[$idx]
-                        $r.UPN = Get-UserPrincipalName -FirstName $r.FirstName -LastName $r.LastName -Company $r.Company
+                        $r.UPN = Get-UserPrincipalName -FirstName $r.FirstName -LastName $r.LastName -Company $r.Company -JobTitle $r.JobTitle
                         $r.DisplayName = "$($r.FirstName) $($r.LastName)"
                         Write-Host "Regenerated: $($r.UPN)" -ForegroundColor Green
                     }
@@ -280,7 +612,7 @@ while (-not $phase1Done) {
                     $roster = Edit-UserField -Users $roster -FieldName "Company"
                     $idx = [int](Read-Host "Row number to regenerate UPN for") - 1
                     $r = $roster[$idx]
-                    $r.UPN = Get-UserPrincipalName -FirstName $r.FirstName -LastName $r.LastName -Company $r.Company
+                    $r.UPN = Get-UserPrincipalName -FirstName $r.FirstName -LastName $r.LastName -Company $r.Company -JobTitle $r.JobTitle
                     Write-Host "Regenerated: $($r.UPN)" -ForegroundColor Green
                 }
                 default { Write-Host "Invalid choice." -ForegroundColor Red }
@@ -340,6 +672,11 @@ while (-not $phase2Done) {
                     "G" { "General" }
                     default { $roster[$idx].Department }
                 }
+                # Recompute license assignment when department changes
+                $lic = Get-LicenseAssignment -Company $roster[$idx].Company -JobTitle $roster[$idx].JobTitle -Department $roster[$idx].Department
+                $roster[$idx].LicensePrimary = $lic.Primary
+                $roster[$idx].LicenseAddOns  = $lic.AddOns
+                $roster[$idx].LicenseLabel   = $lic.RuleLabel
                 Write-Host "Updated row $rowNum to $($roster[$idx].Department)" -ForegroundColor Green
             }
         }
@@ -352,10 +689,98 @@ while (-not $phase2Done) {
 }
 
 # ==========================================================================
-# PHASE 3: Duplicate Check
+# PHASE 3: License Assignment Review
 # ==========================================================================
 
-Write-Phase -Number 3 -Title "DUPLICATE CHECK"
+# Resolve tenant SKUs so we can map SkuPartNumber -> SkuId
+Write-Phase -Number 3 -Title "LICENSE ASSIGNMENT REVIEW"
+Write-Host ""
+Write-Host "Resolving available license SKUs from tenant..." -ForegroundColor White
+
+$tenantSkus = Get-MgSubscribedSku -All
+$skuLookup = @{}
+foreach ($sku in $tenantSkus) {
+    $skuLookup[$sku.SkuPartNumber] = @{
+        SkuId     = $sku.SkuId
+        Name      = $sku.SkuPartNumber
+        Total     = $sku.PrepaidUnits.Enabled
+        Consumed  = $sku.ConsumedUnits
+        Available = $sku.PrepaidUnits.Enabled - $sku.ConsumedUnits
+    }
+}
+
+# Show available SKUs that match our config
+$relevantSkus = @("SPE_E5", "SPB", "INTUNE_A")
+foreach ($skuName in $relevantSkus) {
+    if ($skuLookup.ContainsKey($skuName)) {
+        $s = $skuLookup[$skuName]
+        $color = if ($s.Available -le 0) { "Red" } elseif ($s.Available -le 5) { "Yellow" } else { "Green" }
+        Write-Host "  $($skuName): $($s.Available) available / $($s.Total) total" -ForegroundColor $color
+    }
+    else {
+        Write-Host "  $($skuName): NOT FOUND in tenant" -ForegroundColor Red
+    }
+}
+
+$phase3Done = $false
+while (-not $phase3Done) {
+    Write-Host ""
+    Write-Host ("{0,-4} {1,-20} {2,-12} {3,-20} {4,-20} {5,-30}" -f "#", "Name", "Company", "Primary License", "Add-Ons", "Rule Matched")
+    Write-Host ("{0,-4} {1,-20} {2,-12} {3,-20} {4,-20} {5,-30}" -f "--", "----", "-------", "---------------", "-------", "------------")
+    foreach ($u in $roster) {
+        $addOnDisplay = if ($u.LicenseAddOns -and $u.LicenseAddOns.Count -gt 0) { ($u.LicenseAddOns -join ", ") } else { "(none)" }
+        $primaryDisplay = if ($u.LicensePrimary) { $u.LicensePrimary } else { "NONE" }
+        $licColor = if (-not $u.LicensePrimary) { "Red" } else { "White" }
+        Write-Host ("{0,-4} {1,-20} {2,-12} " -f $u.Row, $u.DisplayName, $u.Company) -NoNewline
+        Write-Host ("{0,-20} " -f $primaryDisplay) -ForegroundColor $licColor -NoNewline
+        Write-Host ("{0,-20} {1,-30}" -f $addOnDisplay, $u.LicenseLabel)
+    }
+
+    # Summarize license demand
+    Write-Host ""
+    $e5Need  = ($roster | Where-Object { $_.LicensePrimary -eq "SPE_E5" }).Count
+    $bpNeed  = ($roster | Where-Object { $_.LicensePrimary -eq "SPB" }).Count
+    $intNeed = ($roster | Where-Object { $_.LicenseAddOns -contains "INTUNE_A" }).Count
+    Write-Host "  Licenses needed:  M365 E5: $e5Need | Business Premium: $bpNeed | Intune Suite: $intNeed" -ForegroundColor Cyan
+
+    $choice = Get-Confirmation -Prompt "Phase 3: License assignments look correct?"
+    switch ($choice) {
+        "Y" { $phase3Done = $true }
+        "E" {
+            $rowNum = Read-Host "Enter row number to change license (1-$($roster.Count))"
+            $idx = [int]$rowNum - 1
+            if ($idx -ge 0 -and $idx -lt $roster.Count) {
+                Write-Host "Current primary: $($roster[$idx].LicensePrimary)"
+                Write-Host "Options: [E] M365 E5 (SPE_E5) / [B] Business Premium (SPB) / [N] None"
+                $licChoice = Read-Host "New primary license"
+                $roster[$idx].LicensePrimary = switch ($licChoice.ToUpper()) {
+                    "E" { "SPE_E5" }
+                    "B" { "SPB" }
+                    "N" { "" }
+                    default { $roster[$idx].LicensePrimary }
+                }
+                $roster[$idx].LicenseLabel = "Manual override"
+
+                $addOnChoice = Read-Host "Add-ons (comma-separated SKU names, e.g. INTUNE_A) or press Enter to keep current"
+                if ($addOnChoice -ne "") {
+                    $roster[$idx].LicenseAddOns = ($addOnChoice -split ",") | ForEach-Object { $_.Trim() }
+                }
+                Write-Host "Updated row $rowNum: Primary=$($roster[$idx].LicensePrimary), AddOns=$($roster[$idx].LicenseAddOns -join ', ')" -ForegroundColor Green
+            }
+        }
+        "Q" {
+            Write-Host "Aborted by user." -ForegroundColor Yellow
+            Disconnect-MgGraph
+            exit 0
+        }
+    }
+}
+
+# ==========================================================================
+# PHASE 4: Duplicate Check
+# ==========================================================================
+
+Write-Phase -Number 4 -Title "DUPLICATE CHECK"
 Write-Host ""
 Write-Host "Checking each UPN against existing tenant users..." -ForegroundColor White
 
@@ -376,11 +801,11 @@ if ($dupCount -gt 0) {
     Write-Host ""
     Write-Host "$dupCount duplicate(s) found. These will be skipped unless you edit their UPN." -ForegroundColor Yellow
 
-    $phase3Done = $false
-    while (-not $phase3Done) {
-        $choice = Get-Confirmation -Prompt "Phase 3: Handle duplicates?"
+    $phase4Done = $false
+    while (-not $phase4Done) {
+        $choice = Get-Confirmation -Prompt "Phase 4: Handle duplicates?"
         switch ($choice) {
-            "Y" { $phase3Done = $true }
+            "Y" { $phase4Done = $true }
             "E" {
                 $rowNum = Read-Host "Row number to edit UPN"
                 $idx = [int]$rowNum - 1
@@ -418,10 +843,10 @@ else {
 }
 
 # ==========================================================================
-# PHASE 4: Manager Lookup
+# PHASE 5: Manager Lookup
 # ==========================================================================
 
-Write-Phase -Number 4 -Title "MANAGER LOOKUP"
+Write-Phase -Number 5 -Title "MANAGER LOOKUP"
 Write-Host ""
 Write-Host "Looking up managers in the tenant..." -ForegroundColor White
 
@@ -462,11 +887,11 @@ if ($notFound -gt 0) {
     Write-Host "$notFound manager(s) not found. You can edit the manager value or continue without." -ForegroundColor Yellow
 }
 
-$phase4Done = $false
-while (-not $phase4Done) {
-    $choice = Get-Confirmation -Prompt "Phase 4: Manager assignments look correct?"
+$phase5Done = $false
+while (-not $phase5Done) {
+    $choice = Get-Confirmation -Prompt "Phase 5: Manager assignments look correct?"
     switch ($choice) {
-        "Y" { $phase4Done = $true }
+        "Y" { $phase5Done = $true }
         "E" {
             $rowNum = Read-Host "Row number to edit manager"
             $idx = [int]$rowNum - 1
@@ -498,10 +923,10 @@ while (-not $phase4Done) {
 }
 
 # ==========================================================================
-# PHASE 5: Final Review
+# PHASE 6: Final Review
 # ==========================================================================
 
-Write-Phase -Number 5 -Title "FINAL REVIEW"
+Write-Phase -Number 6 -Title "FINAL REVIEW"
 Write-Host ""
 
 $toCreate = $roster | Where-Object { -not $_.Duplicate }
@@ -509,11 +934,12 @@ $toSkip   = $roster | Where-Object { $_.Duplicate }
 
 Write-Host "The following $($toCreate.Count) user(s) WILL BE CREATED:" -ForegroundColor Green
 Write-Host ""
-Write-Host ("{0,-4} {1,-20} {2,-30} {3,-15} {4,-30} {5,-25}" -f "#", "Display Name", "UPN", "Department", "Job Title", "Manager")
-Write-Host ("{0,-4} {1,-20} {2,-30} {3,-15} {4,-30} {5,-25}" -f "--", "------------", "---", "----------", "---------", "-------")
+Write-Host ("{0,-4} {1,-20} {2,-30} {3,-15} {4,-20} {5,-20}" -f "#", "Display Name", "UPN", "Department", "License", "Manager")
+Write-Host ("{0,-4} {1,-20} {2,-30} {3,-15} {4,-20} {5,-20}" -f "--", "------------", "---", "----------", "-------", "-------")
 foreach ($u in $toCreate) {
     $mgrDisplay = if ($u.ManagerName -eq "NOT FOUND" -or $u.ManagerName -eq "(none)") { $u.ManagerName } else { $u.ManagerName }
-    Write-Host ("{0,-4} {1,-20} {2,-30} {3,-15} {4,-30} {5,-25}" -f $u.Row, $u.DisplayName, $u.UPN, $u.Department, $u.JobTitle, $mgrDisplay)
+    $licDisplay = if ($u.LicensePrimary) { $u.LicensePrimary } else { "NONE" }
+    Write-Host ("{0,-4} {1,-20} {2,-30} {3,-15} {4,-20} {5,-20}" -f $u.Row, $u.DisplayName, $u.UPN, $u.Department, $licDisplay, $mgrDisplay)
 }
 
 if ($toSkip.Count -gt 0) {
@@ -537,10 +963,10 @@ if ($finalChoice.ToUpper() -ne "Y") {
 }
 
 # ==========================================================================
-# PHASE 6: Create Users & Generate Output
+# PHASE 7: Create Users, Assign Licenses & Generate Output
 # ==========================================================================
 
-Write-Phase -Number 6 -Title "CREATING USERS"
+Write-Phase -Number 7 -Title "CREATING USERS & ASSIGNING LICENSES"
 Write-Host ""
 
 $results = @()
@@ -583,8 +1009,30 @@ foreach ($u in $toCreate) {
             }
         }
 
+        # Assign licenses
+        $licensesAssigned = @()
+        if ($u.LicensePrimary -and $skuLookup.ContainsKey($u.LicensePrimary)) {
+            $allSkus = @($u.LicensePrimary) + @($u.LicenseAddOns | Where-Object { $_ -and $skuLookup.ContainsKey($_) })
+            $addLicenses = @()
+            foreach ($skuName in $allSkus) {
+                $addLicenses += @{ SkuId = $skuLookup[$skuName].SkuId }
+            }
+            try {
+                Set-MgUserLicense -UserId $newUser.Id -AddLicenses $addLicenses -RemoveLicenses @()
+                $licensesAssigned = $allSkus
+                Write-Host "  Licenses -> $($allSkus -join ', ')" -ForegroundColor Green
+            }
+            catch {
+                Write-Host "  License assignment failed: $($_.Exception.Message)" -ForegroundColor Yellow
+            }
+        }
+        elseif ($u.LicensePrimary) {
+            Write-Host "  License SKU '$($u.LicensePrimary)' not found in tenant - skipped" -ForegroundColor Yellow
+        }
+
         $u.Status = "Created"
         $u | Add-Member -NotePropertyName "Password" -NotePropertyValue $tempPass -Force
+        $u | Add-Member -NotePropertyName "AssignedLicenses" -NotePropertyValue ($licensesAssigned -join ", ") -Force
         $results += $u
     }
     catch {
@@ -605,7 +1053,7 @@ $timestamp = Get-Date -Format "yyyyMMdd_HHmmss"
 
 # A) Master Import CSV
 $masterPath = Join-Path $OutputDir "master_import_\${timestamp}.csv"
-$results | Select-Object UPN, FirstName, LastName, DisplayName, JobTitle, Department, Company, Password, Status |
+$results | Select-Object UPN, FirstName, LastName, DisplayName, JobTitle, Department, Company, Password, AssignedLicenses, Status |
     Export-Csv -Path $masterPath -NoTypeInformation
 Write-Host "  Master CSV:      $masterPath" -ForegroundColor Green
 
@@ -669,6 +1117,12 @@ Write-Host ""
 Write-Host "  Sales:      $($salesUsers.Count)" -ForegroundColor White
 Write-Host "  Operations: $($opsUsers.Count)" -ForegroundColor White
 Write-Host "  Other:      $(($results | Where-Object { $_.Department -notin @('Sales','Operations') }).Count)" -ForegroundColor White
+Write-Host ""
+$licensedCount = ($results | Where-Object { $_.AssignedLicenses -and $_.AssignedLicenses -ne "" }).Count
+$e5Assigned    = ($results | Where-Object { $_.AssignedLicenses -match "SPE_E5" }).Count
+$bpAssigned    = ($results | Where-Object { $_.AssignedLicenses -match "SPB" }).Count
+Write-Host "  Licensed:   $licensedCount / $($results.Count)" -ForegroundColor White
+Write-Host "  M365 E5:    $e5Assigned | Business Premium: $bpAssigned" -ForegroundColor White
 Write-Host ""
 Write-Host "Output files saved to: $OutputDir" -ForegroundColor Cyan
 Write-Host ""
@@ -1210,12 +1664,12 @@ Disconnect-MgGraph`,
     where: { slug: "new-user-provisioning" },
     update: {
       content: NEW_USER_PROVISIONING_SCRIPT,
-      description: "Automated new hire provisioning: creates M365 users from CSV input with UPN generation, department assignment, duplicate checking, manager assignment, and generates output reports (master CSV, sales CSV, operations CSV, email lists).",
+      description: "Automated new hire provisioning with three input modes: CSV import, manual name entry, or export a blank CSV template. Includes UPN generation, department assignment, license assignment (M365 E5, Business Premium, Intune Suite based on role/company rules), duplicate checking, manager assignment, and output reports. Does not handle contractor licensing.",
     },
     create: {
       name: "New User Provisioning",
       slug: "new-user-provisioning",
-      description: "Automated new hire provisioning: creates M365 users from CSV input with UPN generation, department assignment, duplicate checking, manager assignment, and generates output reports (master CSV, sales CSV, operations CSV, email lists).",
+      description: "Automated new hire provisioning with three input modes: CSV import, manual name entry, or export a blank CSV template. Includes UPN generation, department assignment, license assignment (M365 E5, Business Premium, Intune Suite based on role/company rules), duplicate checking, manager assignment, and output reports. Does not handle contractor licensing.",
       categoryId: provisioning.id,
       tags: "onboarding,new-hire,provisioning,csv,bulk",
       requiresAdmin: true,
@@ -1230,9 +1684,9 @@ Disconnect-MgGraph`,
       name: "CsvPath",
       label: "Input CSV Path",
       type: "STRING" as const,
-      required: true,
+      required: false,
       defaultValue: "",
-      description: "Path to CSV with columns: FirstName, LastName, Company, JobTitle, Manager (UPN or display name)",
+      description: "Path to CSV with columns: FirstName, LastName, Company, JobTitle, Manager. Leave blank for interactive mode (export template, import CSV, or manual entry).",
       sortOrder: 1,
     },
     {
