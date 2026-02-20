@@ -85,8 +85,7 @@ $OperationsTitlePatterns = @(
     "Client Relationship",
     "Business Development",
     "Servicing",
-    "Quality Assurance",
-    "Software"
+    "Quality Assurance"
 )
 
 $EngineeringTitlePatterns = @(
@@ -99,16 +98,9 @@ $EngineeringTitlePatterns = @(
 )
 
 # ── License Configuration ────────────────────────────────────────────────
-# Maps SKU part-number strings to friendly names used throughout the script.
-# The actual SKU IDs (GUIDs) are resolved dynamically from the tenant.
-
-$LicenseSkuNames = @{
-    "SPE_E5"               = "M365 E5"
-    "SPB"                  = "Business Premium"
-    "INTUNE_A"             = "Intune Suite"
-    "ENTERPRISEPACK"       = "Teams Enterprise"         # fallback if E5 bundles differ
-    "VISIOCLIENT"          = "Visio Plan 2"             # placeholder for add-on pattern
-}
+# SKU IDs (GUIDs) are resolved dynamically from the tenant via Get-MgSubscribedSku.
+# Rules below use SkuPartNumber strings: SPE_E5 (M365 E5), SPB (Business Premium),
+# INTUNE_A (Intune Suite).
 
 # Yrefy license rules (by job-title pattern and department)
 # Each rule returns: @{ Primary = "<SkuPartNumber>"; AddOns = @("<SkuPartNumber>", ...) }
@@ -340,14 +332,7 @@ else {
         "T" {
             # Export CSV template
             $templatePath = Join-Path $OutputDir "new_user_template.csv"
-            $templateHeader = "FirstName,LastName,Company,JobTitle,Manager"
-            $templateExamples = @(
-                "FirstName,LastName,Company,JobTitle,Manager"
-                "Jane,Doe,Yrefy,Student Loan Advocate,jsmith@yrefy.com"
-                "John,Smith,Invessio,Software Engineer,mjones@invessio.com"
-                "Alice,Johnson,Yrefy,Investor Relations Analyst,jsmith@yrefy.com"
-            )
-            $templateExamples | Out-File -FilePath $templatePath -Encoding UTF8
+            @("FirstName,LastName,Company,JobTitle,Manager") | Out-File -FilePath $templatePath -Encoding UTF8
             Write-Host ""
             Write-Host "CSV template exported to: $templatePath" -ForegroundColor Green
             Write-Host ""
@@ -743,6 +728,26 @@ while (-not $phase3Done) {
     $intNeed = ($roster | Where-Object { $_.LicenseAddOns -contains "INTUNE_A" }).Count
     Write-Host "  Licenses needed:  M365 E5: $e5Need | Business Premium: $bpNeed | Intune Suite: $intNeed" -ForegroundColor Cyan
 
+    # Warn if demand exceeds available licenses
+    $shortages = @()
+    if ($skuLookup.ContainsKey("SPE_E5") -and $e5Need -gt $skuLookup["SPE_E5"].Available) {
+        $shortages += "M365 E5: need $e5Need but only $($skuLookup["SPE_E5"].Available) available"
+    }
+    if ($skuLookup.ContainsKey("SPB") -and $bpNeed -gt $skuLookup["SPB"].Available) {
+        $shortages += "Business Premium: need $bpNeed but only $($skuLookup["SPB"].Available) available"
+    }
+    if ($skuLookup.ContainsKey("INTUNE_A") -and $intNeed -gt $skuLookup["INTUNE_A"].Available) {
+        $shortages += "Intune Suite: need $intNeed but only $($skuLookup["INTUNE_A"].Available) available"
+    }
+    if ($shortages.Count -gt 0) {
+        Write-Host ""
+        Write-Host "  WARNING: License demand exceeds available supply!" -ForegroundColor Red
+        foreach ($s in $shortages) {
+            Write-Host "    - $s" -ForegroundColor Red
+        }
+        Write-Host "  Users will be created but some may not receive licenses." -ForegroundColor Yellow
+    }
+
     $choice = Get-Confirmation -Prompt "Phase 3: License assignments look correct?"
     switch ($choice) {
         "Y" { $phase3Done = $true }
@@ -937,7 +942,7 @@ Write-Host ""
 Write-Host ("{0,-4} {1,-20} {2,-30} {3,-15} {4,-20} {5,-20}" -f "#", "Display Name", "UPN", "Department", "License", "Manager")
 Write-Host ("{0,-4} {1,-20} {2,-30} {3,-15} {4,-20} {5,-20}" -f "--", "------------", "---", "----------", "-------", "-------")
 foreach ($u in $toCreate) {
-    $mgrDisplay = if ($u.ManagerName -eq "NOT FOUND" -or $u.ManagerName -eq "(none)") { $u.ManagerName } else { $u.ManagerName }
+    $mgrDisplay = $u.ManagerName
     $licDisplay = if ($u.LicensePrimary) { $u.LicensePrimary } else { "NONE" }
     Write-Host ("{0,-4} {1,-20} {2,-30} {3,-15} {4,-20} {5,-20}" -f $u.Row, $u.DisplayName, $u.UPN, $u.Department, $licDisplay, $mgrDisplay)
 }
