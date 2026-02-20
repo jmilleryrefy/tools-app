@@ -37,7 +37,7 @@ if (-not (Get-Module -ListAvailable -Name Microsoft.Graph)) {
     exit 1
 }
 
-Connect-MgGraph -Scopes "User.ReadWrite.All", "Directory.ReadWrite.All"
+Connect-MgGraph -Scopes "User.ReadWrite.All", "Directory.ReadWrite.All" -UseDeviceCode
 
 # ── Configuration ────────────────────────────────────────────────────────────
 
@@ -773,7 +773,7 @@ async function main() {
 # Requires: Microsoft.Graph PowerShell module
 # Permissions: User.Read.All
 
-Connect-MgGraph -Scopes "User.Read.All"
+Connect-MgGraph -Scopes "User.Read.All" -UseDeviceCode
 
 $users = Get-MgUser -All -Property DisplayName, UserPrincipalName, AssignedLicenses -Filter "assignedLicenses/\\$count ne 0" -ConsistencyLevel eventual -CountVariable count
 
@@ -828,7 +828,7 @@ param(
     [string]$CsvPath
 )
 
-Connect-MgGraph -Scopes "UserAuthenticationMethod.ReadWrite.All"
+Connect-MgGraph -Scopes "UserAuthenticationMethod.ReadWrite.All" -UseDeviceCode
 
 $users = Import-Csv -Path $CsvPath
 
@@ -872,7 +872,7 @@ param(
     [switch]$WhatIf
 )
 
-Connect-MgGraph -Scopes "User.ReadWrite.All", "AuditLog.Read.All"
+Connect-MgGraph -Scopes "User.ReadWrite.All", "AuditLog.Read.All" -UseDeviceCode
 
 $cutoffDate = (Get-Date).AddDays(-$InactiveDays).ToString("yyyy-MM-ddTHH:mm:ssZ")
 
@@ -915,7 +915,7 @@ Disconnect-MgGraph`,
 # Requires: ExchangeOnlineManagement module
 # Permissions: Exchange Administrator
 
-Connect-ExchangeOnline
+Connect-ExchangeOnline -Device
 
 $mailboxes = Get-EXOMailbox -ResultSize Unlimited -Properties DisplayName, UserPrincipalName
 
@@ -964,7 +964,7 @@ param(
     [datetime]$EndTime
 )
 
-Connect-ExchangeOnline
+Connect-ExchangeOnline -Device
 
 $params = @{
     Identity          = $UserPrincipalName
@@ -1006,7 +1006,7 @@ param(
     [string]$AdminUrl
 )
 
-Connect-PnPOnline -Url $AdminUrl -Interactive
+Connect-PnPOnline -Url $AdminUrl -DeviceLogin
 
 $sites = Get-PnPTenantSite -Detailed | Where-Object { $_.Template -ne "SRCHCEN#0" }
 
@@ -1045,7 +1045,7 @@ Disconnect-PnPOnline`,
 # Requires: Microsoft.Graph PowerShell module
 # Permissions: Group.Read.All
 
-Connect-MgGraph -Scopes "Group.Read.All"
+Connect-MgGraph -Scopes "Group.Read.All" -UseDeviceCode
 
 $teams = Get-MgGroup -Filter "resourceProvisioningOptions/Any(x:x eq 'Team')" -All -Property DisplayName, Id, Description, CreatedDateTime
 
@@ -1088,7 +1088,7 @@ Disconnect-MgGraph`,
 # Requires: Microsoft.Graph PowerShell module
 # Permissions: RoleManagement.Read.Directory
 
-Connect-MgGraph -Scopes "RoleManagement.Read.Directory"
+Connect-MgGraph -Scopes "RoleManagement.Read.Directory" -UseDeviceCode
 
 $roles = Get-MgDirectoryRole -All
 
@@ -1129,7 +1129,7 @@ Disconnect-MgGraph`,
 # Requires: Microsoft.Graph PowerShell module
 # Permissions: UserAuthenticationMethod.Read.All, User.Read.All
 
-Connect-MgGraph -Scopes "UserAuthenticationMethod.Read.All", "User.Read.All"
+Connect-MgGraph -Scopes "UserAuthenticationMethod.Read.All", "User.Read.All" -UseDeviceCode
 
 $users = Get-MgUser -All -Property DisplayName, UserPrincipalName, AccountEnabled -Filter "accountEnabled eq true"
 
@@ -1175,7 +1175,7 @@ Disconnect-MgGraph`,
 # Requires: Microsoft.Graph PowerShell module
 # Permissions: Organization.Read.All
 
-Connect-MgGraph -Scopes "Organization.Read.All"
+Connect-MgGraph -Scopes "Organization.Read.All" -UseDeviceCode
 
 $subscriptions = Get-MgSubscribedSku -All
 

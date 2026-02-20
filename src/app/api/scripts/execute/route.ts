@@ -116,7 +116,7 @@ function executePowerShell(script: string): Promise<string> {
   return new Promise((resolve, reject) => {
     const timeoutMs = parseInt(process.env.SCRIPT_TIMEOUT_MS || "120000", 10);
 
-    const ps = spawn("pwsh", ["-NoProfile", "-NonInteractive", "-Command", "-"], {
+    const ps = spawn("pwsh", ["-NoProfile", "-Command", "-"], {
       stdio: ["pipe", "pipe", "pipe"],
     });
 
