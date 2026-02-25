@@ -28,8 +28,8 @@ const NEW_USER_PROVISIONING_SCRIPT = `# ========================================
 #   3. License Assignment Review (auto-mapped from role/company rules)
 #   4. Duplicate Check
 #   5. Manager Lookup
-#   6. Final Review
-#   7. Create Users, Assign Licenses & Generate Output
+#   6. Final Review (includes group assignment preview)
+#   7. Create Users, Assign Licenses & Groups, Generate Output
 #
 # License Rules (employees only - contractors are not handled by this script):
 #   Yrefy/Ignyte SLA        -> Business Premium + Intune Suite
@@ -37,7 +37,7 @@ const NEW_USER_PROVISIONING_SCRIPT = `# ========================================
 #   Invessio Employee       -> M365 E5
 #
 # Requires: Microsoft.Graph PowerShell module
-# Permissions: User.ReadWrite.All, Directory.ReadWrite.All, Organization.Read.All
+# Permissions: User.ReadWrite.All, Directory.ReadWrite.All, Organization.Read.All, Group.ReadWrite.All
 #
 # Input CSV columns: FirstName, LastName, Company, JobTitle, Manager
 # =============================================================================
@@ -57,7 +57,7 @@ if (-not (Get-Module -ListAvailable -Name Microsoft.Graph)) {
     exit 1
 }
 
-Connect-MgGraph -Scopes "User.ReadWrite.All", "Directory.ReadWrite.All", "Organization.Read.All" -UseDeviceCode
+Connect-MgGraph -Scopes "User.ReadWrite.All", "Directory.ReadWrite.All", "Organization.Read.All", "Group.ReadWrite.All" -UseDeviceCode
 
 # ── Configuration ────────────────────────────────────────────────────────────
 
@@ -129,6 +129,27 @@ $InvessioLicenseRules = @(
     }
 )
 
+# ── Group Assignment Configuration ───────────────────────────────────────────
+# Group rules are evaluated in order; ALL matching rules apply (groups accumulate).
+# Each rule has a Match scriptblock receiving ($JobTitle, $Department, $Company).
+# Groups are referenced by display name; IDs are resolved at runtime.
+
+$GroupAssignmentRules = @(
+    # ── Yrefy base groups (all Yrefy employees) ──────────────────────────────
+    @{
+        Label   = "Yrefy base groups"
+        Match   = { param($jt, $dept, $co) $co -in @("Yrefy", "Ignyte") }
+        Groups  = @("Acrobat Pro Windows", "Balto AI Users", "Team Yrefy")
+    },
+    # ── Yrefy Sales / Student Loan Advocate ──────────────────────────────────
+    @{
+        Label   = "Yrefy Sales (SLA)"
+        Match   = { param($jt, $dept, $co) $co -in @("Yrefy", "Ignyte") -and $jt -match "Student Loan Advocate" }
+        Groups  = @("Student Loan Advocates")
+    }
+    # Add additional rules here as new roles/departments are defined
+)
+
 # ── Helper Functions ─────────────────────────────────────────────────────────
 
 function Write-Phase {
@@ -193,6 +214,30 @@ function Get-LicenseAssignment {
         AddOns     = @()
         RuleLabel  = "No matching rule"
     }
+}
+
+function Get-GroupAssignments {
+    param(
+        [string]$JobTitle,
+        [string]$Department,
+        [string]$Company
+    )
+    $groups = @()
+    foreach ($rule in $GroupAssignmentRules) {
+        if (& $rule.Match $JobTitle $Department $Company) {
+            $groups += $rule.Groups
+        }
+    }
+    # De-duplicate while preserving order
+    $seen = @{}
+    $unique = @()
+    foreach ($g in $groups) {
+        if (-not $seen.ContainsKey($g)) {
+            $seen[$g] = $true
+            $unique += $g
+        }
+    }
+    return $unique
 }
 
 function Get-CleanLastName {
@@ -490,8 +535,9 @@ foreach ($row in $csvUsers) {
     $co = $row.Company.Trim()
     $jt = $row.JobTitle.Trim()
     $mg = $row.Manager.Trim()
-    $dept = Get-Department -JobTitle $jt -Company $co
-    $lic  = Get-LicenseAssignment -Company $co -JobTitle $jt -Department $dept
+    $dept   = Get-Department -JobTitle $jt -Company $co
+    $lic    = Get-LicenseAssignment -Company $co -JobTitle $jt -Department $dept
+    $groups = Get-GroupAssignments -JobTitle $jt -Department $dept -Company $co
     [void]$roster.Add([PSCustomObject]@{
         Row            = $roster.Count + 1
         FirstName      = $fn
@@ -505,6 +551,7 @@ foreach ($row in $csvUsers) {
         LicensePrimary = $lic.Primary
         LicenseAddOns  = $lic.AddOns
         LicenseLabel   = $lic.RuleLabel
+        Groups         = $groups
         Duplicate      = $false
         ManagerUPN     = ""
         ManagerName    = ""
@@ -657,11 +704,12 @@ while (-not $phase2Done) {
                     "G" { "General" }
                     default { $roster[$idx].Department }
                 }
-                # Recompute license assignment when department changes
+                # Recompute license and group assignments when department changes
                 $lic = Get-LicenseAssignment -Company $roster[$idx].Company -JobTitle $roster[$idx].JobTitle -Department $roster[$idx].Department
                 $roster[$idx].LicensePrimary = $lic.Primary
                 $roster[$idx].LicenseAddOns  = $lic.AddOns
                 $roster[$idx].LicenseLabel   = $lic.RuleLabel
+                $roster[$idx].Groups = Get-GroupAssignments -JobTitle $roster[$idx].JobTitle -Department $roster[$idx].Department -Company $roster[$idx].Company
                 Write-Host "Updated row $rowNum to $($roster[$idx].Department)" -ForegroundColor Green
             }
         }
@@ -947,6 +995,14 @@ foreach ($u in $toCreate) {
     Write-Host ("{0,-4} {1,-20} {2,-30} {3,-15} {4,-20} {5,-20}" -f $u.Row, $u.DisplayName, $u.UPN, $u.Department, $licDisplay, $mgrDisplay)
 }
 
+# Group assignment summary
+Write-Host ""
+Write-Host "Group Assignments:" -ForegroundColor White
+foreach ($u in $toCreate) {
+    $grpDisplay = if ($u.Groups -and $u.Groups.Count -gt 0) { $u.Groups -join ", " } else { "(none)" }
+    Write-Host ("  {0,-20} -> {1}" -f $u.DisplayName, $grpDisplay) -ForegroundColor White
+}
+
 if ($toSkip.Count -gt 0) {
     Write-Host ""
     Write-Host "The following $($toSkip.Count) user(s) will be SKIPPED (duplicate):" -ForegroundColor Yellow
@@ -971,8 +1027,40 @@ if ($finalChoice.ToUpper() -ne "Y") {
 # PHASE 7: Create Users, Assign Licenses & Generate Output
 # ==========================================================================
 
-Write-Phase -Number 7 -Title "CREATING USERS & ASSIGNING LICENSES"
+Write-Phase -Number 7 -Title "CREATING USERS, ASSIGNING LICENSES & GROUPS"
 Write-Host ""
+
+# Resolve group display names to object IDs
+$allGroupNames = @()
+foreach ($u in $toCreate) {
+    if ($u.Groups) { $allGroupNames += $u.Groups }
+}
+$allGroupNames = $allGroupNames | Sort-Object -Unique
+
+$groupLookup = @{}
+if ($allGroupNames.Count -gt 0) {
+    Write-Host "Resolving Entra ID groups..." -ForegroundColor White
+    foreach ($gName in $allGroupNames) {
+        try {
+            $grp = Get-MgGroup -Filter "displayName eq '$gName'" -ErrorAction Stop
+            if ($grp -and $grp.Count -eq 1) {
+                $groupLookup[$gName] = $grp.Id
+                Write-Host "  [OK] $gName ($($grp.Id))" -ForegroundColor Green
+            }
+            elseif ($grp -and $grp.Count -gt 1) {
+                Write-Host "  [WARN] Multiple groups named '$gName' - skipping (resolve manually)" -ForegroundColor Yellow
+            }
+            else {
+                Write-Host "  [WARN] Group '$gName' not found in tenant" -ForegroundColor Yellow
+            }
+        }
+        catch {
+            Write-Host "  [WARN] Could not resolve group '$gName': $($_.Exception.Message)" -ForegroundColor Yellow
+        }
+    }
+    Write-Host "  Resolved $($groupLookup.Count) / $($allGroupNames.Count) groups" -ForegroundColor White
+    Write-Host ""
+}
 
 $results = @()
 $errors  = @()
@@ -1035,9 +1123,30 @@ foreach ($u in $toCreate) {
             Write-Host "  License SKU '$($u.LicensePrimary)' not found in tenant - skipped" -ForegroundColor Yellow
         }
 
+        # Assign groups
+        $groupsAssigned = @()
+        if ($u.Groups -and $u.Groups.Count -gt 0) {
+            foreach ($gName in $u.Groups) {
+                if ($groupLookup.ContainsKey($gName)) {
+                    try {
+                        New-MgGroupMember -GroupId $groupLookup[$gName] -DirectoryObjectId $newUser.Id
+                        $groupsAssigned += $gName
+                        Write-Host "  Group  -> $gName" -ForegroundColor Green
+                    }
+                    catch {
+                        Write-Host "  Group '$gName' assignment failed: $($_.Exception.Message)" -ForegroundColor Yellow
+                    }
+                }
+                else {
+                    Write-Host "  Group '$gName' was not resolved - skipped" -ForegroundColor Yellow
+                }
+            }
+        }
+
         $u.Status = "Created"
         $u | Add-Member -NotePropertyName "Password" -NotePropertyValue $tempPass -Force
         $u | Add-Member -NotePropertyName "AssignedLicenses" -NotePropertyValue ($licensesAssigned -join ", ") -Force
+        $u | Add-Member -NotePropertyName "AssignedGroups" -NotePropertyValue ($groupsAssigned -join ", ") -Force
         $results += $u
     }
     catch {
@@ -1058,7 +1167,7 @@ $timestamp = Get-Date -Format "yyyyMMdd_HHmmss"
 
 # A) Master Import CSV
 $masterPath = Join-Path $OutputDir "master_import_\${timestamp}.csv"
-$results | Select-Object UPN, FirstName, LastName, DisplayName, JobTitle, Department, Company, Password, AssignedLicenses, Status |
+$results | Select-Object UPN, FirstName, LastName, DisplayName, JobTitle, Department, Company, Password, AssignedLicenses, AssignedGroups, Status |
     Export-Csv -Path $masterPath -NoTypeInformation
 Write-Host "  Master CSV:      $masterPath" -ForegroundColor Green
 
@@ -1128,6 +1237,9 @@ $e5Assigned    = ($results | Where-Object { $_.AssignedLicenses -match "SPE_E5" 
 $bpAssigned    = ($results | Where-Object { $_.AssignedLicenses -match "SPB" }).Count
 Write-Host "  Licensed:   $licensedCount / $($results.Count)" -ForegroundColor White
 Write-Host "  M365 E5:    $e5Assigned | Business Premium: $bpAssigned" -ForegroundColor White
+Write-Host ""
+$groupedCount = ($results | Where-Object { $_.AssignedGroups -and $_.AssignedGroups -ne "" }).Count
+Write-Host "  Group memberships assigned: $groupedCount / $($results.Count) users" -ForegroundColor White
 Write-Host ""
 Write-Host "Output files saved to: $OutputDir" -ForegroundColor Cyan
 Write-Host ""
@@ -1669,12 +1781,12 @@ Disconnect-MgGraph`,
     where: { slug: "new-user-provisioning" },
     update: {
       content: NEW_USER_PROVISIONING_SCRIPT,
-      description: "Automated new hire provisioning with three input modes: CSV import, manual name entry, or export a blank CSV template. Includes UPN generation, department assignment, license assignment (M365 E5, Business Premium, Intune Suite based on role/company rules), duplicate checking, manager assignment, and output reports. Does not handle contractor licensing.",
+      description: "Automated new hire provisioning with three input modes: CSV import, manual name entry, or export a blank CSV template. Includes UPN generation, department assignment, license assignment (M365 E5, Business Premium, Intune Suite based on role/company rules), Entra ID group membership assignment, duplicate checking, manager assignment, and output reports. Does not handle contractor licensing.",
     },
     create: {
       name: "New User Provisioning",
       slug: "new-user-provisioning",
-      description: "Automated new hire provisioning with three input modes: CSV import, manual name entry, or export a blank CSV template. Includes UPN generation, department assignment, license assignment (M365 E5, Business Premium, Intune Suite based on role/company rules), duplicate checking, manager assignment, and output reports. Does not handle contractor licensing.",
+      description: "Automated new hire provisioning with three input modes: CSV import, manual name entry, or export a blank CSV template. Includes UPN generation, department assignment, license assignment (M365 E5, Business Premium, Intune Suite based on role/company rules), Entra ID group membership assignment, duplicate checking, manager assignment, and output reports. Does not handle contractor licensing.",
       categoryId: provisioning.id,
       tags: "onboarding,new-hire,provisioning,csv,bulk",
       requiresAdmin: true,
