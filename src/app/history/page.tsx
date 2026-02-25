@@ -1,13 +1,15 @@
 import Navbar from "@/components/Navbar";
 import { auth } from "@/auth";
 import { prisma } from "@/lib/prisma";
+import { redirect } from "next/navigation";
 import { CheckCircle, XCircle, Clock, Loader2 } from "lucide-react";
 
 export default async function HistoryPage() {
   const session = await auth();
+  if (!session?.user) redirect("/auth/signin");
 
   const executions = await prisma.scriptExecution.findMany({
-    where: { userId: session?.user?.id },
+    where: { userId: session.user.id },
     include: { script: true },
     orderBy: { startedAt: "desc" },
     take: 50,

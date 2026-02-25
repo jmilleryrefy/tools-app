@@ -3,9 +3,17 @@ import { PrismaAdapter } from "@auth/prisma-adapter";
 import { prisma } from "@/lib/prisma";
 import { authConfig } from "@/auth.config";
 
-// Users who should automatically be assigned roles on first sign-in
-const AUTO_ADMIN_EMAILS = ["jmiller@yrefy.com"];
-const AUTO_OPERATOR_EMAILS = ["kwilson@yrefy.com", "crees@yrefy.com"];
+// Auto-role assignment on first sign-in (comma-separated email lists from env)
+// e.g. AUTH_AUTO_ADMIN_EMAILS="jmiller@yrefy.com"
+//      AUTH_AUTO_OPERATOR_EMAILS="kwilson@yrefy.com,crees@yrefy.com"
+const AUTO_ADMIN_EMAILS = (process.env.AUTH_AUTO_ADMIN_EMAILS ?? "")
+  .split(",")
+  .map((e) => e.trim().toLowerCase())
+  .filter(Boolean);
+const AUTO_OPERATOR_EMAILS = (process.env.AUTH_AUTO_OPERATOR_EMAILS ?? "")
+  .split(",")
+  .map((e) => e.trim().toLowerCase())
+  .filter(Boolean);
 
 export const { handlers, auth, signIn, signOut } = NextAuth({
   ...authConfig,

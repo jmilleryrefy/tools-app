@@ -645,7 +645,14 @@ while (-not $phase1Done) {
                     $idx = [int](Read-Host "Row number to regenerate UPN for") - 1
                     $r = $roster[$idx]
                     $r.UPN = Get-UserPrincipalName -FirstName $r.FirstName -LastName $r.LastName -Company $r.Company -JobTitle $r.JobTitle
-                    Write-Host "Regenerated: $($r.UPN)" -ForegroundColor Green
+                    # Recompute department, license, and group assignments when company changes
+                    $r.Department = Get-Department -JobTitle $r.JobTitle -Company $r.Company
+                    $lic = Get-LicenseAssignment -Company $r.Company -JobTitle $r.JobTitle -Department $r.Department
+                    $r.LicensePrimary = $lic.Primary
+                    $r.LicenseAddOns  = $lic.AddOns
+                    $r.LicenseLabel   = $lic.RuleLabel
+                    $r.Groups = Get-GroupAssignments -JobTitle $r.JobTitle -Department $r.Department -Company $r.Company
+                    Write-Host "Regenerated: $($r.UPN) | Dept: $($r.Department) | Groups: $($r.Groups -join ', ')" -ForegroundColor Green
                 }
                 default { Write-Host "Invalid choice." -ForegroundColor Red }
             }
@@ -1042,7 +1049,7 @@ if ($allGroupNames.Count -gt 0) {
     Write-Host "Resolving Entra ID groups..." -ForegroundColor White
     foreach ($gName in $allGroupNames) {
         try {
-            $grp = Get-MgGroup -Filter "displayName eq '$gName'" -ErrorAction Stop
+            $grp = @(Get-MgGroup -Filter "displayName eq '$gName'" -ErrorAction Stop)
             if ($grp -and $grp.Count -eq 1) {
                 $groupLookup[$gName] = $grp.Id
                 Write-Host "  [OK] $gName ($($grp.Id))" -ForegroundColor Green

@@ -1,12 +1,12 @@
 import MicrosoftEntraID from "next-auth/providers/microsoft-entra-id";
 import type { NextAuthConfig } from "next-auth";
 
-// Only these email addresses are allowed to sign in
-const ALLOWED_USERS = [
-  "jmiller@yrefy.com",
-  "kwilson@yrefy.com",
-  "crees@yrefy.com",
-];
+// Allowed users loaded from env (comma-separated email list)
+// e.g. AUTH_ALLOWED_USERS="jmiller@yrefy.com,kwilson@yrefy.com,crees@yrefy.com"
+const ALLOWED_USERS = (process.env.AUTH_ALLOWED_USERS ?? "")
+  .split(",")
+  .map((e) => e.trim().toLowerCase())
+  .filter(Boolean);
 
 // Edge-safe auth config — no Prisma, no Node.js modules
 // Used by middleware for route protection
@@ -21,6 +21,8 @@ export const authConfig: NextAuthConfig = {
   callbacks: {
     async signIn({ user }) {
       if (!user.email) return false;
+      // If no allowlist is configured, allow all tenant users
+      if (ALLOWED_USERS.length === 0) return true;
       return ALLOWED_USERS.includes(user.email.toLowerCase());
     },
   },

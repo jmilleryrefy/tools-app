@@ -1,6 +1,8 @@
 import Navbar from "@/components/Navbar";
 import ScriptCard from "@/components/ScriptCard";
+import { auth } from "@/auth";
 import { prisma } from "@/lib/prisma";
+import { redirect } from "next/navigation";
 import { FolderOpen } from "lucide-react";
 
 export default async function ScriptsPage({
@@ -8,6 +10,9 @@ export default async function ScriptsPage({
 }: {
   searchParams: Promise<{ category?: string; search?: string }>;
 }) {
+  const session = await auth();
+  if (!session?.user) redirect("/auth/signin");
+
   const { category, search } = await searchParams;
 
   const categories = await prisma.category.findMany({

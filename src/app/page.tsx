@@ -1,6 +1,7 @@
 import Navbar from "@/components/Navbar";
 import { auth } from "@/auth";
 import { prisma } from "@/lib/prisma";
+import { redirect } from "next/navigation";
 import Link from "next/link";
 import {
   ScrollText,
@@ -12,13 +13,14 @@ import {
 
 export default async function DashboardPage() {
   const session = await auth();
+  if (!session?.user) redirect("/auth/signin");
 
   const [scriptCount, categoryCount, recentExecutions, recentScripts] =
     await Promise.all([
       prisma.script.count({ where: { isActive: true } }),
       prisma.category.count(),
       prisma.scriptExecution.count({
-        where: { userId: session?.user?.id },
+        where: { userId: session.user.id },
       }),
       prisma.script.findMany({
         where: { isActive: true },
@@ -35,7 +37,7 @@ export default async function DashboardPage() {
         {/* Welcome */}
         <div className="mb-8">
           <h1 className="text-2xl font-bold text-white mb-1">
-            Welcome back, {session?.user?.name?.split(" ")[0] || "User"}
+            Welcome back, {session.user.name?.split(" ")[0] || "User"}
           </h1>
           <p className="text-gray-400">
             Manage and execute M365 PowerShell scripts for your tenant.

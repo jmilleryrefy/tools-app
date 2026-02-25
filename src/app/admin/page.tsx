@@ -12,8 +12,10 @@ import {
 
 export default async function AdminPage() {
   const session = await auth();
+  if (!session?.user) redirect("/auth/signin");
+
   const dbUser = await prisma.user.findUnique({
-    where: { id: session?.user?.id },
+    where: { id: session.user.id },
     select: { role: true },
   });
 

@@ -2,8 +2,9 @@ import Navbar from "@/components/Navbar";
 import CodeBlock from "@/components/CodeBlock";
 import CopyButton from "@/components/CopyButton";
 import ScriptExecutor from "@/components/ScriptExecutor";
+import { auth } from "@/auth";
 import { prisma } from "@/lib/prisma";
-import { notFound } from "next/navigation";
+import { notFound, redirect } from "next/navigation";
 import Link from "next/link";
 import {
   ArrowLeft,
@@ -19,6 +20,9 @@ export default async function ScriptDetailPage({
 }: {
   params: Promise<{ slug: string }>;
 }) {
+  const session = await auth();
+  if (!session?.user) redirect("/auth/signin");
+
   const { slug } = await params;
 
   const script = await prisma.script.findUnique({
