@@ -17,7 +17,6 @@ export default function SignInPage() {
           <form
             action={async () => {
               "use server";
-              console.log("[AUTH SIGNIN PAGE] Sign-in form submitted, initiating microsoft-entra-id flow");
               await signIn("microsoft-entra-id", { redirectTo: "/" });
             }}
           >

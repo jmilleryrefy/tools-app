@@ -9,20 +9,12 @@ import { NextRequest, NextResponse } from "next/server";
 const SESSION_COOKIE_NAME = "authjs.session-token";
 
 export function proxy(req: NextRequest) {
-  const { pathname } = req.nextUrl;
-  const hasSessionToken = req.cookies.has(SESSION_COOKIE_NAME);
-  const cookieNames = req.cookies.getAll().map((c) => c.name);
-
-  console.log(`[AUTH PROXY] ${req.method} ${pathname} | hasSessionToken: ${hasSessionToken} | cookies: [${cookieNames.join(", ")}]`);
-
-  if (!hasSessionToken) {
-    console.log(`[AUTH PROXY] No session cookie, redirecting to /auth/signin`);
+  if (!req.cookies.has(SESSION_COOKIE_NAME)) {
     const response = NextResponse.redirect(new URL("/auth/signin", req.url));
     // Clear stale prefixed cookies from previous NextAuth config
-    for (const name of cookieNames) {
-      if (name.startsWith("__Host-") || name.startsWith("__Secure-")) {
-        console.log(`[AUTH PROXY] Clearing stale cookie: ${name}`);
-        response.cookies.delete(name);
+    for (const cookie of req.cookies.getAll()) {
+      if (cookie.name.startsWith("__Host-") || cookie.name.startsWith("__Secure-")) {
+        response.cookies.delete(cookie.name);
       }
     }
     return response;

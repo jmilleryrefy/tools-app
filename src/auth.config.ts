@@ -8,18 +8,11 @@ const ALLOWED_USERS = (process.env.AUTH_ALLOWED_USERS ?? "")
   .map((e) => e.trim().toLowerCase())
   .filter(Boolean);
 
-console.log("[AUTH CONFIG] Loaded allowed users list:", ALLOWED_USERS.length > 0 ? ALLOWED_USERS : "(empty - all tenant users allowed)");
-
 // Determine cookie settings based on NEXTAUTH_URL scheme.
 // Non-standard domains (e.g. no public TLD like "tools.it.yrefy") may reject
 // __Secure- or __Host- prefixed cookies, so we use unprefixed names and
 // explicitly set secure/sameSite/path to ensure the browser stores them.
 const useSecureCookies = (process.env.NEXTAUTH_URL ?? "").startsWith("https://");
-
-console.log("[AUTH CONFIG] NEXTAUTH_URL:", process.env.NEXTAUTH_URL ?? "(not set)");
-console.log("[AUTH CONFIG] useSecureCookies:", useSecureCookies);
-console.log("[AUTH CONFIG] AUTH_TRUST_HOST:", process.env.AUTH_TRUST_HOST ?? "(not set)");
-console.log("[AUTH CONFIG] Cookie names will be: authjs.session-token, authjs.callback-url, authjs.csrf-token (unprefixed)");
 
 // Edge-safe auth config — no Prisma, no Node.js modules
 // Used by middleware for route protection
@@ -63,18 +56,10 @@ export const authConfig: NextAuthConfig = {
   },
   callbacks: {
     async signIn({ user }) {
-      console.log("[AUTH SIGN-IN] signIn callback triggered for user:", { email: user.email, name: user.name });
-      if (!user.email) {
-        console.log("[AUTH SIGN-IN] REJECTED: No email on user object");
-        return false;
-      }
-      if (ALLOWED_USERS.length === 0) {
-        console.log("[AUTH SIGN-IN] ALLOWED: No allowlist configured, permitting all tenant users");
-        return true;
-      }
-      const allowed = ALLOWED_USERS.includes(user.email.toLowerCase());
-      console.log(`[AUTH SIGN-IN] ${allowed ? "ALLOWED" : "REJECTED"}: ${user.email} (allowlist check)`);
-      return allowed;
+      if (!user.email) return false;
+      // If no allowlist is configured, allow all tenant users
+      if (ALLOWED_USERS.length === 0) return true;
+      return ALLOWED_USERS.includes(user.email.toLowerCase());
     },
   },
   pages: {
