@@ -8,6 +8,8 @@ const ALLOWED_USERS = (process.env.AUTH_ALLOWED_USERS ?? "")
   .map((e) => e.trim().toLowerCase())
   .filter(Boolean);
 
+console.log("[AUTH CONFIG] Loaded allowed users list:", ALLOWED_USERS.length > 0 ? ALLOWED_USERS : "(empty - all tenant users allowed)");
+
 // Edge-safe auth config — no Prisma, no Node.js modules
 // Used by middleware for route protection
 export const authConfig: NextAuthConfig = {
@@ -20,10 +22,18 @@ export const authConfig: NextAuthConfig = {
   ],
   callbacks: {
     async signIn({ user }) {
-      if (!user.email) return false;
-      // If no allowlist is configured, allow all tenant users
-      if (ALLOWED_USERS.length === 0) return true;
-      return ALLOWED_USERS.includes(user.email.toLowerCase());
+      console.log("[AUTH SIGN-IN] signIn callback triggered for user:", { email: user.email, name: user.name });
+      if (!user.email) {
+        console.log("[AUTH SIGN-IN] REJECTED: No email on user object");
+        return false;
+      }
+      if (ALLOWED_USERS.length === 0) {
+        console.log("[AUTH SIGN-IN] ALLOWED: No allowlist configured, permitting all tenant users");
+        return true;
+      }
+      const allowed = ALLOWED_USERS.includes(user.email.toLowerCase());
+      console.log(`[AUTH SIGN-IN] ${allowed ? "ALLOWED" : "REJECTED"}: ${user.email} (allowlist check)`);
+      return allowed;
     },
   },
   pages: {
