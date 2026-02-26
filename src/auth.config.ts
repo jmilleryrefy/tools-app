@@ -10,9 +10,21 @@ const ALLOWED_USERS = (process.env.AUTH_ALLOWED_USERS ?? "")
 
 console.log("[AUTH CONFIG] Loaded allowed users list:", ALLOWED_USERS.length > 0 ? ALLOWED_USERS : "(empty - all tenant users allowed)");
 
+// Determine cookie settings based on NEXTAUTH_URL scheme.
+// Non-standard domains (e.g. no public TLD like "tools.it.yrefy") may reject
+// __Secure- or __Host- prefixed cookies, so we use unprefixed names and
+// explicitly set secure/sameSite/path to ensure the browser stores them.
+const useSecureCookies = (process.env.NEXTAUTH_URL ?? "").startsWith("https://");
+
+console.log("[AUTH CONFIG] NEXTAUTH_URL:", process.env.NEXTAUTH_URL ?? "(not set)");
+console.log("[AUTH CONFIG] useSecureCookies:", useSecureCookies);
+console.log("[AUTH CONFIG] AUTH_TRUST_HOST:", process.env.AUTH_TRUST_HOST ?? "(not set)");
+console.log("[AUTH CONFIG] Cookie names will be: authjs.session-token, authjs.callback-url, authjs.csrf-token (unprefixed)");
+
 // Edge-safe auth config — no Prisma, no Node.js modules
 // Used by middleware for route protection
 export const authConfig: NextAuthConfig = {
+  trustHost: true,
   providers: [
     MicrosoftEntraID({
       clientId: process.env.AUTH_MICROSOFT_ENTRA_ID_ID!,
@@ -20,6 +32,35 @@ export const authConfig: NextAuthConfig = {
       issuer: `https://login.microsoftonline.com/${process.env.AUTH_MICROSOFT_ENTRA_ID_TENANT_ID}/v2.0`,
     }),
   ],
+  // Use unprefixed cookie names to avoid browser rejection on non-standard TLD domains
+  cookies: {
+    sessionToken: {
+      name: "authjs.session-token",
+      options: {
+        httpOnly: true,
+        sameSite: "lax",
+        path: "/",
+        secure: useSecureCookies,
+      },
+    },
+    callbackUrl: {
+      name: "authjs.callback-url",
+      options: {
+        sameSite: "lax",
+        path: "/",
+        secure: useSecureCookies,
+      },
+    },
+    csrfToken: {
+      name: "authjs.csrf-token",
+      options: {
+        httpOnly: true,
+        sameSite: "lax",
+        path: "/",
+        secure: useSecureCookies,
+      },
+    },
+  },
   callbacks: {
     async signIn({ user }) {
       console.log("[AUTH SIGN-IN] signIn callback triggered for user:", { email: user.email, name: user.name });
