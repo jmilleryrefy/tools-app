@@ -18,6 +18,7 @@ const AUTO_OPERATOR_EMAILS = (process.env.AUTH_AUTO_OPERATOR_EMAILS ?? "")
 export const { handlers, auth, signIn, signOut } = NextAuth({
   ...authConfig,
   adapter: PrismaAdapter(prisma),
+  session: { strategy: "database" },
   events: {
     async createUser({ user }) {
       // Auto-assign roles on first sign-in
