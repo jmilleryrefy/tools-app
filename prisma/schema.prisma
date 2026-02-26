@@ -12,7 +12,7 @@ model User {
   name          String?
   email         String    @unique
   emailVerified DateTime?
-  image         String?
+  image         String?   @db.Text
   role          UserRole  @default(VIEWER)
   accounts      Account[]
   sessions      Session[]
