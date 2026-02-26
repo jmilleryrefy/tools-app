@@ -52,9 +52,25 @@ param(
 
 # ── Modules & Connection ─────────────────────────────────────────────────────
 
-if (-not (Get-Module -ListAvailable -Name Microsoft.Graph)) {
-    Write-Error "Microsoft.Graph module is not installed. Run: Install-Module Microsoft.Graph -Scope CurrentUser"
-    exit 1
+$requiredModules = @(
+    "Microsoft.Graph.Authentication",
+    "Microsoft.Graph.Users",
+    "Microsoft.Graph.Identity.DirectoryManagement",
+    "Microsoft.Graph.Groups"
+)
+
+foreach ($mod in $requiredModules) {
+    if (-not (Get-Module -ListAvailable -Name $mod)) {
+        Write-Host "$mod not found. Installing..." -ForegroundColor Yellow
+        try {
+            Install-Module $mod -Scope CurrentUser -Force -AllowClobber
+            Write-Host "$mod installed successfully." -ForegroundColor Green
+        } catch {
+            Write-Error "Failed to install $mod. Please run 'Install-Module $mod -Scope CurrentUser -Force' manually."
+            exit 1
+        }
+    }
+    Import-Module $mod -ErrorAction Stop
 }
 
 Connect-MgGraph -Scopes "User.ReadWrite.All", "Directory.ReadWrite.All", "Organization.Read.All", "Group.ReadWrite.All" -UseDeviceCode
@@ -1351,6 +1367,22 @@ async function main() {
 # Requires: Microsoft.Graph PowerShell module
 # Permissions: User.Read.All
 
+# Check and install required modules if not present
+$requiredModules = @("Microsoft.Graph.Authentication", "Microsoft.Graph.Users")
+foreach ($mod in $requiredModules) {
+    if (-not (Get-Module -ListAvailable -Name $mod)) {
+        Write-Host "$mod not found. Installing..." -ForegroundColor Yellow
+        try {
+            Install-Module $mod -Scope CurrentUser -Force -AllowClobber
+            Write-Host "$mod installed successfully." -ForegroundColor Green
+        } catch {
+            Write-Error "Failed to install $mod. Please run 'Install-Module $mod -Scope CurrentUser -Force' manually."
+            exit 1
+        }
+    }
+    Import-Module $mod -ErrorAction Stop
+}
+
 Connect-MgGraph -Scopes "User.Read.All" -UseDeviceCode
 
 $users = Get-MgUser -All -Property DisplayName, UserPrincipalName, AssignedLicenses -Filter "assignedLicenses/\\$count ne 0" -ConsistencyLevel eventual -CountVariable count
@@ -1406,6 +1438,22 @@ param(
     [string]$CsvPath
 )
 
+# Check and install required modules if not present
+$requiredModules = @("Microsoft.Graph.Authentication", "Microsoft.Graph.Users")
+foreach ($mod in $requiredModules) {
+    if (-not (Get-Module -ListAvailable -Name $mod)) {
+        Write-Host "$mod not found. Installing..." -ForegroundColor Yellow
+        try {
+            Install-Module $mod -Scope CurrentUser -Force -AllowClobber
+            Write-Host "$mod installed successfully." -ForegroundColor Green
+        } catch {
+            Write-Error "Failed to install $mod. Please run 'Install-Module $mod -Scope CurrentUser -Force' manually."
+            exit 1
+        }
+    }
+    Import-Module $mod -ErrorAction Stop
+}
+
 Connect-MgGraph -Scopes "UserAuthenticationMethod.ReadWrite.All" -UseDeviceCode
 
 $users = Import-Csv -Path $CsvPath
@@ -1449,6 +1497,22 @@ param(
     [int]$InactiveDays = 90,
     [switch]$WhatIf
 )
+
+# Check and install required modules if not present
+$requiredModules = @("Microsoft.Graph.Authentication", "Microsoft.Graph.Users")
+foreach ($mod in $requiredModules) {
+    if (-not (Get-Module -ListAvailable -Name $mod)) {
+        Write-Host "$mod not found. Installing..." -ForegroundColor Yellow
+        try {
+            Install-Module $mod -Scope CurrentUser -Force -AllowClobber
+            Write-Host "$mod installed successfully." -ForegroundColor Green
+        } catch {
+            Write-Error "Failed to install $mod. Please run 'Install-Module $mod -Scope CurrentUser -Force' manually."
+            exit 1
+        }
+    }
+    Import-Module $mod -ErrorAction Stop
+}
 
 Connect-MgGraph -Scopes "User.ReadWrite.All", "AuditLog.Read.All" -UseDeviceCode
 
@@ -1623,6 +1687,22 @@ Disconnect-PnPOnline`,
 # Requires: Microsoft.Graph PowerShell module
 # Permissions: Group.Read.All
 
+# Check and install required modules if not present
+$requiredModules = @("Microsoft.Graph.Authentication", "Microsoft.Graph.Groups", "Microsoft.Graph.Users")
+foreach ($mod in $requiredModules) {
+    if (-not (Get-Module -ListAvailable -Name $mod)) {
+        Write-Host "$mod not found. Installing..." -ForegroundColor Yellow
+        try {
+            Install-Module $mod -Scope CurrentUser -Force -AllowClobber
+            Write-Host "$mod installed successfully." -ForegroundColor Green
+        } catch {
+            Write-Error "Failed to install $mod. Please run 'Install-Module $mod -Scope CurrentUser -Force' manually."
+            exit 1
+        }
+    }
+    Import-Module $mod -ErrorAction Stop
+}
+
 Connect-MgGraph -Scopes "Group.Read.All" -UseDeviceCode
 
 $teams = Get-MgGroup -Filter "resourceProvisioningOptions/Any(x:x eq 'Team')" -All -Property DisplayName, Id, Description, CreatedDateTime
@@ -1666,6 +1746,22 @@ Disconnect-MgGraph`,
 # Requires: Microsoft.Graph PowerShell module
 # Permissions: RoleManagement.Read.Directory
 
+# Check and install required modules if not present
+$requiredModules = @("Microsoft.Graph.Authentication", "Microsoft.Graph.Identity.DirectoryManagement", "Microsoft.Graph.Users")
+foreach ($mod in $requiredModules) {
+    if (-not (Get-Module -ListAvailable -Name $mod)) {
+        Write-Host "$mod not found. Installing..." -ForegroundColor Yellow
+        try {
+            Install-Module $mod -Scope CurrentUser -Force -AllowClobber
+            Write-Host "$mod installed successfully." -ForegroundColor Green
+        } catch {
+            Write-Error "Failed to install $mod. Please run 'Install-Module $mod -Scope CurrentUser -Force' manually."
+            exit 1
+        }
+    }
+    Import-Module $mod -ErrorAction Stop
+}
+
 Connect-MgGraph -Scopes "RoleManagement.Read.Directory" -UseDeviceCode
 
 $roles = Get-MgDirectoryRole -All
@@ -1706,6 +1802,22 @@ Disconnect-MgGraph`,
       content: `# Check MFA Registration Status
 # Requires: Microsoft.Graph PowerShell module
 # Permissions: UserAuthenticationMethod.Read.All, User.Read.All
+
+# Check and install required modules if not present
+$requiredModules = @("Microsoft.Graph.Authentication", "Microsoft.Graph.Users")
+foreach ($mod in $requiredModules) {
+    if (-not (Get-Module -ListAvailable -Name $mod)) {
+        Write-Host "$mod not found. Installing..." -ForegroundColor Yellow
+        try {
+            Install-Module $mod -Scope CurrentUser -Force -AllowClobber
+            Write-Host "$mod installed successfully." -ForegroundColor Green
+        } catch {
+            Write-Error "Failed to install $mod. Please run 'Install-Module $mod -Scope CurrentUser -Force' manually."
+            exit 1
+        }
+    }
+    Import-Module $mod -ErrorAction Stop
+}
 
 Connect-MgGraph -Scopes "UserAuthenticationMethod.Read.All", "User.Read.All" -UseDeviceCode
 
@@ -1752,6 +1864,22 @@ Disconnect-MgGraph`,
       content: `# License Utilization Report
 # Requires: Microsoft.Graph PowerShell module
 # Permissions: Organization.Read.All
+
+# Check and install required modules if not present
+$requiredModules = @("Microsoft.Graph.Authentication", "Microsoft.Graph.Identity.DirectoryManagement")
+foreach ($mod in $requiredModules) {
+    if (-not (Get-Module -ListAvailable -Name $mod)) {
+        Write-Host "$mod not found. Installing..." -ForegroundColor Yellow
+        try {
+            Install-Module $mod -Scope CurrentUser -Force -AllowClobber
+            Write-Host "$mod installed successfully." -ForegroundColor Green
+        } catch {
+            Write-Error "Failed to install $mod. Please run 'Install-Module $mod -Scope CurrentUser -Force' manually."
+            exit 1
+        }
+    }
+    Import-Module $mod -ErrorAction Stop
+}
 
 Connect-MgGraph -Scopes "Organization.Read.All" -UseDeviceCode
 
