@@ -18,10 +18,44 @@ const AUTO_OPERATOR_EMAILS = (process.env.AUTH_AUTO_OPERATOR_EMAILS ?? "")
 console.log("[AUTH] Auto-admin emails:", AUTO_ADMIN_EMAILS.length > 0 ? AUTO_ADMIN_EMAILS : "(none)");
 console.log("[AUTH] Auto-operator emails:", AUTO_OPERATOR_EMAILS.length > 0 ? AUTO_OPERATOR_EMAILS : "(none)");
 
+// Wrap the Prisma adapter to log all adapter operations
+const baseAdapter = PrismaAdapter(prisma);
+const loggingAdapter = new Proxy(baseAdapter, {
+  get(target, prop, receiver) {
+    const value = Reflect.get(target, prop, receiver);
+    if (typeof value === "function") {
+      return async (...args: unknown[]) => {
+        console.log(`[AUTH ADAPTER] ${String(prop)} called with:`, JSON.stringify(args, null, 2).slice(0, 500));
+        try {
+          const result = await (value as Function).apply(target, args);
+          console.log(`[AUTH ADAPTER] ${String(prop)} returned:`, JSON.stringify(result, null, 2)?.slice(0, 500) ?? "undefined");
+          return result;
+        } catch (error) {
+          console.error(`[AUTH ADAPTER] ${String(prop)} THREW ERROR:`, error);
+          throw error;
+        }
+      };
+    }
+    return value;
+  },
+});
+
 export const { handlers, auth, signIn, signOut } = NextAuth({
   ...authConfig,
-  adapter: PrismaAdapter(prisma),
+  adapter: loggingAdapter,
   session: { strategy: "database" },
+  logger: {
+    error: (code, ...message) => {
+      console.error("[AUTH ERROR]", code, ...message);
+    },
+    warn: (code) => {
+      console.warn("[AUTH WARN]", code);
+    },
+    debug: (code, ...message) => {
+      console.log("[AUTH DEBUG]", code, ...message);
+    },
+  },
+  debug: true,
   events: {
     async createUser({ user }) {
       console.log("[AUTH] createUser event fired for:", { id: user.id, email: user.email, name: user.name });
