@@ -1,21 +1,35 @@
-import NextAuth from "next-auth";
-import { authConfig } from "@/auth.config";
-import { NextResponse } from "next/server";
+import { NextRequest, NextResponse } from "next/server";
 
-// Use the edge-safe config (no Prisma) for proxy
-const { auth } = NextAuth(authConfig);
+// Optimistic cookie-based proxy for route protection.
+// Because we use database sessions (not JWT), the edge middleware CANNOT validate
+// sessions (no Prisma on the edge). Previously, wrapping with NextAuth's `auth()`
+// caused it to invalidate and DELETE the session cookie since it couldn't look it up.
+// Instead, we simply check for the session token cookie's presence and redirect to
+// sign-in if missing. The real session validation happens server-side in each page/API.
+const SESSION_COOKIE_NAME = "authjs.session-token";
 
-export const proxy = auth((req) => {
+export function proxy(req: NextRequest) {
   const { pathname } = req.nextUrl;
-  const isAuthenticated = !!req.auth;
+  const hasSessionToken = req.cookies.has(SESSION_COOKIE_NAME);
   const cookieNames = req.cookies.getAll().map((c) => c.name);
-  console.log(`[AUTH PROXY] ${req.method} ${pathname} | authenticated: ${isAuthenticated} | user: ${req.auth?.user?.email ?? "none"} | cookies: [${cookieNames.join(", ")}]`);
-  if (!isAuthenticated) {
-    console.log(`[AUTH PROXY] Unauthenticated request to ${pathname} — letting NextAuth handle redirect`);
+
+  console.log(`[AUTH PROXY] ${req.method} ${pathname} | hasSessionToken: ${hasSessionToken} | cookies: [${cookieNames.join(", ")}]`);
+
+  if (!hasSessionToken) {
+    console.log(`[AUTH PROXY] No session cookie, redirecting to /auth/signin`);
+    const response = NextResponse.redirect(new URL("/auth/signin", req.url));
+    // Clear stale prefixed cookies from previous NextAuth config
+    for (const name of cookieNames) {
+      if (name.startsWith("__Host-") || name.startsWith("__Secure-")) {
+        console.log(`[AUTH PROXY] Clearing stale cookie: ${name}`);
+        response.cookies.delete(name);
+      }
+    }
+    return response;
   }
-  // Let NextAuth's default behavior handle the redirect for unauthenticated users
+
   return NextResponse.next();
-});
+}
 
 export const config = {
   matcher: [
