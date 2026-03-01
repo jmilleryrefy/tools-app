@@ -6,6 +6,29 @@ const adapter = new PrismaMariaDb(process.env.DATABASE_URL!);
 
 const prisma = new PrismaClient({ adapter });
 
+/**
+ * Generates a PowerShell prerequisite block that checks for required
+ * modules and auto-installs them if missing.
+ */
+function moduleCheck(modules: string[]): string {
+  const quoted = modules.map((m) => `"${m}"`).join(", ");
+  return `# Check and install required modules if not present
+$requiredModules = @(${quoted})
+foreach ($mod in $requiredModules) {
+    if (-not (Get-Module -ListAvailable -Name $mod)) {
+        Write-Host "$mod not found. Installing..." -ForegroundColor Yellow
+        try {
+            Install-Module $mod -Scope CurrentUser -Force -AllowClobber
+            Write-Host "$mod installed successfully." -ForegroundColor Green
+        } catch {
+            Write-Error "Failed to install $mod. Please run 'Install-Module $mod -Scope CurrentUser -Force' manually."
+            exit 1
+        }
+    }
+    Import-Module $mod -ErrorAction Stop
+}`;
+}
+
 // ---------------------------------------------------------------------------
 // New User Provisioning Script
 // ---------------------------------------------------------------------------
@@ -52,26 +75,7 @@ param(
 
 # ── Modules & Connection ─────────────────────────────────────────────────────
 
-$requiredModules = @(
-    "Microsoft.Graph.Authentication",
-    "Microsoft.Graph.Users",
-    "Microsoft.Graph.Identity.DirectoryManagement",
-    "Microsoft.Graph.Groups"
-)
-
-foreach ($mod in $requiredModules) {
-    if (-not (Get-Module -ListAvailable -Name $mod)) {
-        Write-Host "$mod not found. Installing..." -ForegroundColor Yellow
-        try {
-            Install-Module $mod -Scope CurrentUser -Force -AllowClobber
-            Write-Host "$mod installed successfully." -ForegroundColor Green
-        } catch {
-            Write-Error "Failed to install $mod. Please run 'Install-Module $mod -Scope CurrentUser -Force' manually."
-            exit 1
-        }
-    }
-    Import-Module $mod -ErrorAction Stop
-}
+${moduleCheck(["Microsoft.Graph.Authentication", "Microsoft.Graph.Users", "Microsoft.Graph.Identity.DirectoryManagement", "Microsoft.Graph.Groups"])}
 
 Connect-MgGraph -Scopes "User.ReadWrite.All", "Directory.ReadWrite.All", "Organization.Read.All", "Group.ReadWrite.All" -UseDeviceCode
 
@@ -1367,38 +1371,38 @@ async function main() {
 # Requires: Microsoft.Graph PowerShell module
 # Permissions: User.Read.All
 
-# Check and install required modules if not present
-$requiredModules = @("Microsoft.Graph.Authentication", "Microsoft.Graph.Users")
-foreach ($mod in $requiredModules) {
-    if (-not (Get-Module -ListAvailable -Name $mod)) {
-        Write-Host "$mod not found. Installing..." -ForegroundColor Yellow
-        try {
-            Install-Module $mod -Scope CurrentUser -Force -AllowClobber
-            Write-Host "$mod installed successfully." -ForegroundColor Green
-        } catch {
-            Write-Error "Failed to install $mod. Please run 'Install-Module $mod -Scope CurrentUser -Force' manually."
-            exit 1
-        }
-    }
-    Import-Module $mod -ErrorAction Stop
-}
+param(
+    [string]$ExportPath = ""
+)
+
+${moduleCheck(["Microsoft.Graph.Authentication", "Microsoft.Graph.Users"])}
 
 Connect-MgGraph -Scopes "User.Read.All" -UseDeviceCode
 
-$users = Get-MgUser -All -Property DisplayName, UserPrincipalName, AssignedLicenses -Filter "assignedLicenses/\\$count ne 0" -ConsistencyLevel eventual -CountVariable count
+try {
+    $users = Get-MgUser -All -Property DisplayName, UserPrincipalName, AssignedLicenses -Filter "assignedLicenses/\\$count ne 0" -ConsistencyLevel eventual -CountVariable count
 
-$users | ForEach-Object {
-    $licenseSkus = ($_.AssignedLicenses | ForEach-Object { $_.SkuId }) -join ", "
-    [PSCustomObject]@{
-        DisplayName       = $_.DisplayName
-        UserPrincipalName = $_.UserPrincipalName
-        LicenseSKUs       = $licenseSkus
+    $results = $users | ForEach-Object {
+        $licenseSkus = ($_.AssignedLicenses | ForEach-Object { $_.SkuId }) -join ", "
+        [PSCustomObject]@{
+            DisplayName       = $_.DisplayName
+            UserPrincipalName = $_.UserPrincipalName
+            LicenseSKUs       = $licenseSkus
+        }
     }
-} | Format-Table -AutoSize
 
-Write-Host "\\nTotal licensed users: $count" -ForegroundColor Cyan
+    $results | Format-Table -AutoSize
 
-Disconnect-MgGraph`,
+    if ($ExportPath) {
+        $results | Export-Csv -Path $ExportPath -NoTypeInformation
+        Write-Host "Results exported to $ExportPath" -ForegroundColor Green
+    }
+
+    Write-Host "\\nTotal licensed users: $count" -ForegroundColor Cyan
+}
+finally {
+    Disconnect-MgGraph
+}`,
     },
   });
 
@@ -1438,44 +1442,33 @@ param(
     [string]$CsvPath
 )
 
-# Check and install required modules if not present
-$requiredModules = @("Microsoft.Graph.Authentication", "Microsoft.Graph.Users")
-foreach ($mod in $requiredModules) {
-    if (-not (Get-Module -ListAvailable -Name $mod)) {
-        Write-Host "$mod not found. Installing..." -ForegroundColor Yellow
-        try {
-            Install-Module $mod -Scope CurrentUser -Force -AllowClobber
-            Write-Host "$mod installed successfully." -ForegroundColor Green
-        } catch {
-            Write-Error "Failed to install $mod. Please run 'Install-Module $mod -Scope CurrentUser -Force' manually."
-            exit 1
-        }
-    }
-    Import-Module $mod -ErrorAction Stop
-}
+${moduleCheck(["Microsoft.Graph.Authentication", "Microsoft.Graph.Users"])}
 
 Connect-MgGraph -Scopes "UserAuthenticationMethod.ReadWrite.All" -UseDeviceCode
 
-$users = Import-Csv -Path $CsvPath
+try {
+    $users = Import-Csv -Path $CsvPath
 
-foreach ($user in $users) {
-    $upn = $user.UserPrincipalName
-    $tempPassword = -join ((65..90) + (97..122) + (48..57) + (33,35,36,37) | Get-Random -Count 16 | ForEach-Object { [char]$_ })
+    foreach ($user in $users) {
+        $upn = $user.UserPrincipalName
+        $tempPassword = -join ((65..90) + (97..122) + (48..57) + (33,35,36,37,42) | Get-Random -Count 16 | ForEach-Object { [char]$_ })
 
-    try {
-        $passwordProfile = @{
-            Password                      = $tempPassword
-            ForceChangePasswordNextSignIn  = $true
+        try {
+            $passwordProfile = @{
+                Password                      = $tempPassword
+                ForceChangePasswordNextSignIn  = $true
+            }
+            Update-MgUser -UserId $upn -PasswordProfile $passwordProfile
+            Write-Host "[OK] $upn - Temp password: $tempPassword" -ForegroundColor Green
         }
-        Update-MgUser -UserId $upn -PasswordProfile $passwordProfile
-        Write-Host "[OK] $upn - Temp password: $tempPassword" -ForegroundColor Green
-    }
-    catch {
-        Write-Host "[FAIL] $upn - $($_.Exception.Message)" -ForegroundColor Red
+        catch {
+            Write-Host "[FAIL] $upn - $($_.Exception.Message)" -ForegroundColor Red
+        }
     }
 }
-
-Disconnect-MgGraph`,
+finally {
+    Disconnect-MgGraph
+}`,
     },
   });
 
@@ -1498,47 +1491,43 @@ param(
     [switch]$WhatIf
 )
 
-# Check and install required modules if not present
-$requiredModules = @("Microsoft.Graph.Authentication", "Microsoft.Graph.Users")
-foreach ($mod in $requiredModules) {
-    if (-not (Get-Module -ListAvailable -Name $mod)) {
-        Write-Host "$mod not found. Installing..." -ForegroundColor Yellow
-        try {
-            Install-Module $mod -Scope CurrentUser -Force -AllowClobber
-            Write-Host "$mod installed successfully." -ForegroundColor Green
-        } catch {
-            Write-Error "Failed to install $mod. Please run 'Install-Module $mod -Scope CurrentUser -Force' manually."
-            exit 1
-        }
-    }
-    Import-Module $mod -ErrorAction Stop
-}
+${moduleCheck(["Microsoft.Graph.Authentication", "Microsoft.Graph.Users"])}
 
 Connect-MgGraph -Scopes "User.ReadWrite.All", "AuditLog.Read.All" -UseDeviceCode
 
-$cutoffDate = (Get-Date).AddDays(-$InactiveDays).ToString("yyyy-MM-ddTHH:mm:ssZ")
+try {
+    $cutoffDate = (Get-Date).AddDays(-$InactiveDays).ToString("yyyy-MM-ddTHH:mm:ssZ")
 
-$inactiveUsers = Get-MgUser -All -Property DisplayName, UserPrincipalName, SignInActivity, AccountEnabled -Filter "accountEnabled eq true" |
-    Where-Object {
-        $_.SignInActivity.LastSignInDateTime -and
-        $_.SignInActivity.LastSignInDateTime -lt $cutoffDate
-    }
+    # Note: Users who have NEVER signed in are not included in this filter.
+    # To include them, add: -or (-not $_.SignInActivity.LastSignInDateTime)
+    $inactiveUsers = Get-MgUser -All -Property DisplayName, UserPrincipalName, SignInActivity, AccountEnabled -Filter "accountEnabled eq true" |
+        Where-Object {
+            $_.SignInActivity.LastSignInDateTime -and
+            $_.SignInActivity.LastSignInDateTime -lt $cutoffDate
+        }
 
-Write-Host "Found $($inactiveUsers.Count) users inactive for $InactiveDays+ days:" -ForegroundColor Yellow
+    Write-Host "Found $($inactiveUsers.Count) users inactive for $InactiveDays+ days:" -ForegroundColor Yellow
 
-foreach ($user in $inactiveUsers) {
-    $lastSignIn = $user.SignInActivity.LastSignInDateTime
-    Write-Host "  $($user.DisplayName) ($($user.UserPrincipalName)) - Last sign-in: $lastSignIn"
+    foreach ($user in $inactiveUsers) {
+        $lastSignIn = $user.SignInActivity.LastSignInDateTime
+        Write-Host "  $($user.DisplayName) ($($user.UserPrincipalName)) - Last sign-in: $lastSignIn"
 
-    if (-not $WhatIf) {
-        Update-MgUser -UserId $user.Id -AccountEnabled:$false
-        Write-Host "    -> Account disabled" -ForegroundColor Red
-    } else {
-        Write-Host "    -> [WhatIf] Would disable account" -ForegroundColor Cyan
+        if (-not $WhatIf) {
+            try {
+                Update-MgUser -UserId $user.Id -AccountEnabled:$false
+                Write-Host "    -> Account disabled" -ForegroundColor Red
+            }
+            catch {
+                Write-Host "    -> [FAIL] $($_.Exception.Message)" -ForegroundColor Red
+            }
+        } else {
+            Write-Host "    -> [WhatIf] Would disable account" -ForegroundColor Cyan
+        }
     }
 }
-
-Disconnect-MgGraph`,
+finally {
+    Disconnect-MgGraph
+}`,
     },
   });
 
@@ -1557,27 +1546,33 @@ Disconnect-MgGraph`,
 # Requires: ExchangeOnlineManagement module
 # Permissions: Exchange Administrator
 
+${moduleCheck(["ExchangeOnlineManagement"])}
+
 Connect-ExchangeOnline -Device
 
-$mailboxes = Get-EXOMailbox -ResultSize Unlimited -Properties DisplayName, UserPrincipalName
+try {
+    $mailboxes = Get-EXOMailbox -ResultSize Unlimited -Properties DisplayName, UserPrincipalName
 
-$report = $mailboxes | ForEach-Object {
-    $stats = Get-EXOMailboxStatistics -Identity $_.UserPrincipalName -ErrorAction SilentlyContinue
-    if ($stats) {
-        [PSCustomObject]@{
-            DisplayName = $_.DisplayName
-            UPN         = $_.UserPrincipalName
-            ItemCount   = $stats.ItemCount
-            TotalSize   = $stats.TotalItemSize.Value.ToString()
+    $report = $mailboxes | ForEach-Object {
+        $stats = Get-EXOMailboxStatistics -Identity $_.UserPrincipalName -ErrorAction SilentlyContinue
+        if ($stats) {
+            [PSCustomObject]@{
+                DisplayName  = $_.DisplayName
+                UPN          = $_.UserPrincipalName
+                ItemCount    = $stats.ItemCount
+                TotalSize    = $stats.TotalItemSize.Value.ToString()
+                TotalSizeBytes = $stats.TotalItemSize.Value.ToBytes()
+            }
         }
     }
+
+    $report | Sort-Object TotalSizeBytes -Descending | Format-Table DisplayName, UPN, ItemCount, TotalSize -AutoSize
+
+    Write-Host "\\nTotal mailboxes: $($report.Count)" -ForegroundColor Cyan
 }
-
-$report | Sort-Object { [int64]($_.TotalSize -replace '[^0-9]') } -Descending | Format-Table -AutoSize
-
-Write-Host "\\nTotal mailboxes: $($report.Count)" -ForegroundColor Cyan
-
-Disconnect-ExchangeOnline -Confirm:$false`,
+finally {
+    Disconnect-ExchangeOnline -Confirm:$false
+}`,
     },
   });
 
@@ -1592,6 +1587,7 @@ Disconnect-ExchangeOnline -Confirm:$false`,
       tags: "exchange,mailbox,ooo,auto-reply",
       content: `# Set Out of Office Auto-Reply
 # Requires: ExchangeOnlineManagement module
+# Permissions: Exchange Administrator
 
 param(
     [Parameter(Mandatory=$true)]
@@ -1606,25 +1602,30 @@ param(
     [datetime]$EndTime
 )
 
+${moduleCheck(["ExchangeOnlineManagement"])}
+
 Connect-ExchangeOnline -Device
 
-$params = @{
-    Identity          = $UserPrincipalName
-    AutoReplyState    = "Scheduled"
-    InternalMessage   = $InternalMessage
-    ExternalMessage   = if ($ExternalMessage) { $ExternalMessage } else { $InternalMessage }
-    ExternalAudience  = "Known"
+try {
+    $params = @{
+        Identity          = $UserPrincipalName
+        AutoReplyState    = "Scheduled"
+        InternalMessage   = $InternalMessage
+        ExternalMessage   = if ($ExternalMessage) { $ExternalMessage } else { $InternalMessage }
+        ExternalAudience  = "Known"
+    }
+
+    if ($StartTime) { $params.StartTime = $StartTime }
+    if ($EndTime)   { $params.EndTime = $EndTime }
+
+    Set-MailboxAutoReplyConfiguration @params
+
+    Write-Host "Out of office configured for $UserPrincipalName" -ForegroundColor Green
+    Get-MailboxAutoReplyConfiguration -Identity $UserPrincipalName | Format-List
 }
-
-if ($StartTime) { $params.StartTime = $StartTime }
-if ($EndTime)   { $params.EndTime = $EndTime }
-
-Set-MailboxAutoReplyConfiguration @params
-
-Write-Host "Out of office configured for $UserPrincipalName" -ForegroundColor Green
-Get-MailboxAutoReplyConfiguration -Identity $UserPrincipalName | Format-List
-
-Disconnect-ExchangeOnline -Confirm:$false`,
+finally {
+    Disconnect-ExchangeOnline -Confirm:$false
+}`,
     },
   });
 
@@ -1648,27 +1649,32 @@ param(
     [string]$AdminUrl
 )
 
+${moduleCheck(["PnP.PowerShell"])}
+
 Connect-PnPOnline -Url $AdminUrl -DeviceLogin
 
-$sites = Get-PnPTenantSite -Detailed | Where-Object { $_.Template -ne "SRCHCEN#0" }
+try {
+    $sites = Get-PnPTenantSite -Detailed | Where-Object { $_.Template -ne "SRCHCEN#0" }
 
-$report = $sites | ForEach-Object {
-    [PSCustomObject]@{
-        Title         = $_.Title
-        Url           = $_.Url
-        StorageUsedMB = [math]::Round($_.StorageUsageCurrent, 2)
-        StorageQuotaMB = $_.StorageQuota
-        PercentUsed   = if ($_.StorageQuota -gt 0) { [math]::Round(($_.StorageUsageCurrent / $_.StorageQuota) * 100, 1) } else { 0 }
-        LastModified  = $_.LastContentModifiedDate
+    $report = $sites | ForEach-Object {
+        [PSCustomObject]@{
+            Title         = $_.Title
+            Url           = $_.Url
+            StorageUsedMB = [math]::Round($_.StorageUsageCurrent, 2)
+            StorageQuotaMB = $_.StorageQuota
+            PercentUsed   = if ($_.StorageQuota -gt 0) { [math]::Round(($_.StorageUsageCurrent / $_.StorageQuota) * 100, 1) } else { 0 }
+            LastModified  = $_.LastContentModifiedDate
+        }
     }
+
+    $report | Sort-Object StorageUsedMB -Descending | Format-Table -AutoSize
+
+    $totalGB = [math]::Round(($report | Measure-Object -Property StorageUsedMB -Sum).Sum / 1024, 2)
+    Write-Host "\\nTotal storage used: $totalGB GB across $($report.Count) sites" -ForegroundColor Cyan
 }
-
-$report | Sort-Object StorageUsedMB -Descending | Format-Table -AutoSize
-
-$totalGB = [math]::Round(($report | Measure-Object -Property StorageUsedMB -Sum).Sum / 1024, 2)
-Write-Host "\\nTotal storage used: $totalGB GB across $($report.Count) sites" -ForegroundColor Cyan
-
-Disconnect-PnPOnline`,
+finally {
+    Disconnect-PnPOnline
+}`,
     },
   });
 
@@ -1687,46 +1693,36 @@ Disconnect-PnPOnline`,
 # Requires: Microsoft.Graph PowerShell module
 # Permissions: Group.Read.All
 
-# Check and install required modules if not present
-$requiredModules = @("Microsoft.Graph.Authentication", "Microsoft.Graph.Groups", "Microsoft.Graph.Users")
-foreach ($mod in $requiredModules) {
-    if (-not (Get-Module -ListAvailable -Name $mod)) {
-        Write-Host "$mod not found. Installing..." -ForegroundColor Yellow
-        try {
-            Install-Module $mod -Scope CurrentUser -Force -AllowClobber
-            Write-Host "$mod installed successfully." -ForegroundColor Green
-        } catch {
-            Write-Error "Failed to install $mod. Please run 'Install-Module $mod -Scope CurrentUser -Force' manually."
-            exit 1
-        }
-    }
-    Import-Module $mod -ErrorAction Stop
-}
+${moduleCheck(["Microsoft.Graph.Authentication", "Microsoft.Graph.Groups", "Microsoft.Graph.Users"])}
 
 Connect-MgGraph -Scopes "Group.Read.All" -UseDeviceCode
 
-$teams = Get-MgGroup -Filter "resourceProvisioningOptions/Any(x:x eq 'Team')" -All -Property DisplayName, Id, Description, CreatedDateTime
+try {
+    $teams = Get-MgGroup -Filter "resourceProvisioningOptions/Any(x:x eq 'Team')" -All -Property DisplayName, Id, Description, CreatedDateTime
 
-$report = foreach ($team in $teams) {
-    $owners = Get-MgGroupOwner -GroupId $team.Id -All | ForEach-Object {
-        (Get-MgUser -UserId $_.Id -Property DisplayName).DisplayName
+    $report = foreach ($team in $teams) {
+        $owners = Get-MgGroupOwner -GroupId $team.Id -All | ForEach-Object {
+            $user = Get-MgUser -UserId $_.Id -Property DisplayName -ErrorAction SilentlyContinue
+            if ($user) { $user.DisplayName }
+        } | Where-Object { $_ }
+
+        [PSCustomObject]@{
+            TeamName    = $team.DisplayName
+            Description = $team.Description
+            Created     = $team.CreatedDateTime
+            Owners      = ($owners -join "; ")
+            OwnerCount  = @($owners).Count
+        }
     }
 
-    [PSCustomObject]@{
-        TeamName    = $team.DisplayName
-        Description = $team.Description
-        Created     = $team.CreatedDateTime
-        Owners      = ($owners -join "; ")
-        OwnerCount  = $owners.Count
-    }
+    $report | Format-Table TeamName, OwnerCount, Owners, Created -AutoSize
+
+    $ownerless = ($report | Where-Object { $_.OwnerCount -eq 0 }).Count
+    Write-Host "\\nTotal teams: $($report.Count) | Ownerless teams: $ownerless" -ForegroundColor $(if ($ownerless -gt 0) { "Yellow" } else { "Cyan" })
 }
-
-$report | Format-Table TeamName, OwnerCount, Owners, Created -AutoSize
-
-$ownerless = ($report | Where-Object { $_.OwnerCount -eq 0 }).Count
-Write-Host "\\nTotal teams: $($report.Count) | Ownerless teams: $ownerless" -ForegroundColor $(if ($ownerless -gt 0) { "Yellow" } else { "Cyan" })
-
-Disconnect-MgGraph`,
+finally {
+    Disconnect-MgGraph
+}`,
     },
   });
 
@@ -1746,47 +1742,36 @@ Disconnect-MgGraph`,
 # Requires: Microsoft.Graph PowerShell module
 # Permissions: RoleManagement.Read.Directory
 
-# Check and install required modules if not present
-$requiredModules = @("Microsoft.Graph.Authentication", "Microsoft.Graph.Identity.DirectoryManagement", "Microsoft.Graph.Users")
-foreach ($mod in $requiredModules) {
-    if (-not (Get-Module -ListAvailable -Name $mod)) {
-        Write-Host "$mod not found. Installing..." -ForegroundColor Yellow
-        try {
-            Install-Module $mod -Scope CurrentUser -Force -AllowClobber
-            Write-Host "$mod installed successfully." -ForegroundColor Green
-        } catch {
-            Write-Error "Failed to install $mod. Please run 'Install-Module $mod -Scope CurrentUser -Force' manually."
-            exit 1
-        }
-    }
-    Import-Module $mod -ErrorAction Stop
-}
+${moduleCheck(["Microsoft.Graph.Authentication", "Microsoft.Graph.Identity.DirectoryManagement", "Microsoft.Graph.Users"])}
 
 Connect-MgGraph -Scopes "RoleManagement.Read.Directory" -UseDeviceCode
 
-$roles = Get-MgDirectoryRole -All
+try {
+    $roles = Get-MgDirectoryRole -All
 
-$report = foreach ($role in $roles) {
-    $members = Get-MgDirectoryRoleMember -DirectoryRoleId $role.Id -All
+    $report = foreach ($role in $roles) {
+        $members = Get-MgDirectoryRoleMember -DirectoryRoleId $role.Id -All
 
-    foreach ($member in $members) {
-        $user = Get-MgUser -UserId $member.Id -Property DisplayName, UserPrincipalName -ErrorAction SilentlyContinue
-        if ($user) {
-            [PSCustomObject]@{
-                Role              = $role.DisplayName
-                DisplayName       = $user.DisplayName
-                UserPrincipalName = $user.UserPrincipalName
+        foreach ($member in $members) {
+            $user = Get-MgUser -UserId $member.Id -Property DisplayName, UserPrincipalName -ErrorAction SilentlyContinue
+            if ($user) {
+                [PSCustomObject]@{
+                    Role              = $role.DisplayName
+                    DisplayName       = $user.DisplayName
+                    UserPrincipalName = $user.UserPrincipalName
+                }
             }
         }
     }
+
+    $report | Sort-Object Role, DisplayName | Format-Table -AutoSize
+
+    $uniqueAdmins = ($report | Select-Object -Property UserPrincipalName -Unique).Count
+    Write-Host "\\nTotal role assignments: $($report.Count) across $uniqueAdmins unique admin accounts" -ForegroundColor Cyan
 }
-
-$report | Sort-Object Role, DisplayName | Format-Table -AutoSize
-
-$uniqueAdmins = ($report | Select-Object -Property UserPrincipalName -Unique).Count
-Write-Host "\\nTotal role assignments: $($report.Count) across $uniqueAdmins unique admin accounts" -ForegroundColor Cyan
-
-Disconnect-MgGraph`,
+finally {
+    Disconnect-MgGraph
+}`,
     },
   });
 
@@ -1803,50 +1788,43 @@ Disconnect-MgGraph`,
 # Requires: Microsoft.Graph PowerShell module
 # Permissions: UserAuthenticationMethod.Read.All, User.Read.All
 
-# Check and install required modules if not present
-$requiredModules = @("Microsoft.Graph.Authentication", "Microsoft.Graph.Users")
-foreach ($mod in $requiredModules) {
-    if (-not (Get-Module -ListAvailable -Name $mod)) {
-        Write-Host "$mod not found. Installing..." -ForegroundColor Yellow
-        try {
-            Install-Module $mod -Scope CurrentUser -Force -AllowClobber
-            Write-Host "$mod installed successfully." -ForegroundColor Green
-        } catch {
-            Write-Error "Failed to install $mod. Please run 'Install-Module $mod -Scope CurrentUser -Force' manually."
-            exit 1
-        }
-    }
-    Import-Module $mod -ErrorAction Stop
-}
+${moduleCheck(["Microsoft.Graph.Authentication", "Microsoft.Graph.Users", "Microsoft.Graph.Identity.SignIns"])}
 
 Connect-MgGraph -Scopes "UserAuthenticationMethod.Read.All", "User.Read.All" -UseDeviceCode
 
-$users = Get-MgUser -All -Property DisplayName, UserPrincipalName, AccountEnabled -Filter "accountEnabled eq true"
+try {
+    $users = Get-MgUser -All -Property DisplayName, UserPrincipalName, AccountEnabled -Filter "accountEnabled eq true"
 
-$report = foreach ($user in $users) {
-    $methods = Get-MgUserAuthenticationMethod -UserId $user.Id
+    $i = 0
+    $report = foreach ($user in $users) {
+        $i++
+        Write-Host "\\rChecking user $i of $($users.Count)..." -NoNewline
+        $methods = Get-MgUserAuthenticationMethod -UserId $user.Id
 
-    $hasMfa = ($methods | Where-Object {
-        $_.AdditionalProperties.'@odata.type' -ne '#microsoft.graph.passwordAuthenticationMethod'
-    }).Count -gt 0
+        $hasMfa = ($methods | Where-Object {
+            $_.AdditionalProperties.'@odata.type' -ne '#microsoft.graph.passwordAuthenticationMethod'
+        }).Count -gt 0
 
-    [PSCustomObject]@{
-        DisplayName = $user.DisplayName
-        UPN         = $user.UserPrincipalName
-        MFAEnabled  = $hasMfa
-        MethodCount = $methods.Count
-        Methods     = ($methods | ForEach-Object { $_.AdditionalProperties.'@odata.type'.Split('.')[-1] }) -join ", "
+        [PSCustomObject]@{
+            DisplayName = $user.DisplayName
+            UPN         = $user.UserPrincipalName
+            MFAEnabled  = $hasMfa
+            MethodCount = $methods.Count
+            Methods     = ($methods | ForEach-Object { $_.AdditionalProperties.'@odata.type'.Split('.')[-1] }) -join ", "
+        }
     }
+    Write-Host ""
+
+    $mfaEnabled = ($report | Where-Object { $_.MFAEnabled }).Count
+    $mfaDisabled = ($report | Where-Object { -not $_.MFAEnabled }).Count
+
+    $report | Format-Table DisplayName, UPN, MFAEnabled, Methods -AutoSize
+
+    Write-Host "\\nMFA Enabled: $mfaEnabled | MFA Not Configured: $mfaDisabled" -ForegroundColor $(if ($mfaDisabled -gt 0) { "Yellow" } else { "Green" })
 }
-
-$mfaEnabled = ($report | Where-Object { $_.MFAEnabled }).Count
-$mfaDisabled = ($report | Where-Object { -not $_.MFAEnabled }).Count
-
-$report | Format-Table DisplayName, UPN, MFAEnabled, Methods -AutoSize
-
-Write-Host "\\nMFA Enabled: $mfaEnabled | MFA Not Configured: $mfaDisabled" -ForegroundColor $(if ($mfaDisabled -gt 0) { "Yellow" } else { "Green" })
-
-Disconnect-MgGraph`,
+finally {
+    Disconnect-MgGraph
+}`,
     },
   });
 
@@ -1865,48 +1843,37 @@ Disconnect-MgGraph`,
 # Requires: Microsoft.Graph PowerShell module
 # Permissions: Organization.Read.All
 
-# Check and install required modules if not present
-$requiredModules = @("Microsoft.Graph.Authentication", "Microsoft.Graph.Identity.DirectoryManagement")
-foreach ($mod in $requiredModules) {
-    if (-not (Get-Module -ListAvailable -Name $mod)) {
-        Write-Host "$mod not found. Installing..." -ForegroundColor Yellow
-        try {
-            Install-Module $mod -Scope CurrentUser -Force -AllowClobber
-            Write-Host "$mod installed successfully." -ForegroundColor Green
-        } catch {
-            Write-Error "Failed to install $mod. Please run 'Install-Module $mod -Scope CurrentUser -Force' manually."
-            exit 1
-        }
-    }
-    Import-Module $mod -ErrorAction Stop
-}
+${moduleCheck(["Microsoft.Graph.Authentication", "Microsoft.Graph.Identity.DirectoryManagement"])}
 
 Connect-MgGraph -Scopes "Organization.Read.All" -UseDeviceCode
 
-$subscriptions = Get-MgSubscribedSku -All
+try {
+    $subscriptions = Get-MgSubscribedSku -All
 
-$report = $subscriptions | ForEach-Object {
-    $consumed = $_.ConsumedUnits
-    $total = $_.PrepaidUnits.Enabled
-    $available = $total - $consumed
-    $utilization = if ($total -gt 0) { [math]::Round(($consumed / $total) * 100, 1) } else { 0 }
+    $report = $subscriptions | ForEach-Object {
+        $consumed = $_.ConsumedUnits
+        $total = $_.PrepaidUnits.Enabled
+        $available = $total - $consumed
+        $utilization = if ($total -gt 0) { [math]::Round(($consumed / $total) * 100, 1) } else { 0 }
 
-    [PSCustomObject]@{
-        SKU           = $_.SkuPartNumber
-        Total         = $total
-        Assigned      = $consumed
-        Available     = $available
-        Utilization   = "$utilization%"
+        [PSCustomObject]@{
+            SKU           = $_.SkuPartNumber
+            Total         = $total
+            Assigned      = $consumed
+            Available     = $available
+            Utilization   = "$utilization%"
+        }
     }
+
+    $report | Sort-Object SKU | Format-Table -AutoSize
+
+    $totalLicenses = ($report | Measure-Object -Property Total -Sum).Sum
+    $totalAssigned = ($report | Measure-Object -Property Assigned -Sum).Sum
+    Write-Host "\\nOverall: $totalAssigned / $totalLicenses licenses assigned ($([math]::Round(($totalAssigned/$totalLicenses)*100,1))% utilization)" -ForegroundColor Cyan
 }
-
-$report | Sort-Object SKU | Format-Table -AutoSize
-
-$totalLicenses = ($report | Measure-Object -Property Total -Sum).Sum
-$totalAssigned = ($report | Measure-Object -Property Assigned -Sum).Sum
-Write-Host "\\nOverall: $totalAssigned / $totalLicenses licenses assigned ($([math]::Round(($totalAssigned/$totalLicenses)*100,1))% utilization)" -ForegroundColor Cyan
-
-Disconnect-MgGraph`,
+finally {
+    Disconnect-MgGraph
+}`,
     },
   });
 
