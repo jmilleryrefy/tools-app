@@ -77,7 +77,7 @@ param(
 
 ${moduleCheck(["Microsoft.Graph.Authentication", "Microsoft.Graph.Users", "Microsoft.Graph.Identity.DirectoryManagement", "Microsoft.Graph.Groups"])}
 
-Connect-MgGraph -Scopes "User.ReadWrite.All", "Directory.ReadWrite.All", "Organization.Read.All", "Group.ReadWrite.All" -UseDeviceCode
+Connect-MgGraph -Scopes "User.ReadWrite.All", "Directory.ReadWrite.All", "Organization.Read.All", "Group.ReadWrite.All" -UseDeviceCode -NoWelcome
 
 # ── Configuration ────────────────────────────────────────────────────────────
 
@@ -1373,7 +1373,7 @@ param(
 
 ${moduleCheck(["Microsoft.Graph.Authentication", "Microsoft.Graph.Users"])}
 
-Connect-MgGraph -Scopes "User.Read.All" -UseDeviceCode
+Connect-MgGraph -Scopes "User.Read.All" -UseDeviceCode -NoWelcome
 
 try {
     $users = Get-MgUser -All -Property DisplayName, UserPrincipalName, AssignedLicenses -Filter "assignedLicenses/\\$count ne 0" -ConsistencyLevel eventual -CountVariable count
@@ -1416,7 +1416,7 @@ param(
 
 ${moduleCheck(["Microsoft.Graph.Authentication", "Microsoft.Graph.Users"])}
 
-Connect-MgGraph -Scopes "User.Read.All" -UseDeviceCode
+Connect-MgGraph -Scopes "User.Read.All" -UseDeviceCode -NoWelcome
 
 try {
     $users = Get-MgUser -All -Property DisplayName, UserPrincipalName, AssignedLicenses -Filter "assignedLicenses/\\$count ne 0" -ConsistencyLevel eventual -CountVariable count
@@ -1479,7 +1479,7 @@ param(
 
 ${moduleCheck(["Microsoft.Graph.Authentication", "Microsoft.Graph.Users"])}
 
-Connect-MgGraph -Scopes "UserAuthenticationMethod.ReadWrite.All" -UseDeviceCode
+Connect-MgGraph -Scopes "UserAuthenticationMethod.ReadWrite.All" -UseDeviceCode -NoWelcome
 
 try {
     $users = Import-Csv -Path $CsvPath
@@ -1524,7 +1524,7 @@ param(
 
 ${moduleCheck(["Microsoft.Graph.Authentication", "Microsoft.Graph.Users"])}
 
-Connect-MgGraph -Scopes "UserAuthenticationMethod.ReadWrite.All" -UseDeviceCode
+Connect-MgGraph -Scopes "UserAuthenticationMethod.ReadWrite.All" -UseDeviceCode -NoWelcome
 
 try {
     $users = Import-Csv -Path $CsvPath
@@ -1569,7 +1569,7 @@ param(
 
 ${moduleCheck(["Microsoft.Graph.Authentication", "Microsoft.Graph.Users"])}
 
-Connect-MgGraph -Scopes "User.ReadWrite.All", "AuditLog.Read.All" -UseDeviceCode
+Connect-MgGraph -Scopes "User.ReadWrite.All", "AuditLog.Read.All" -UseDeviceCode -NoWelcome
 
 try {
     $cutoffDate = (Get-Date).AddDays(-$InactiveDays).ToString("yyyy-MM-ddTHH:mm:ssZ")
@@ -1623,7 +1623,7 @@ param(
 
 ${moduleCheck(["Microsoft.Graph.Authentication", "Microsoft.Graph.Users"])}
 
-Connect-MgGraph -Scopes "User.ReadWrite.All", "AuditLog.Read.All" -UseDeviceCode
+Connect-MgGraph -Scopes "User.ReadWrite.All", "AuditLog.Read.All" -UseDeviceCode -NoWelcome
 
 try {
     $cutoffDate = (Get-Date).AddDays(-$InactiveDays).ToString("yyyy-MM-ddTHH:mm:ssZ")
@@ -1937,7 +1937,7 @@ finally {
 
 ${moduleCheck(["Microsoft.Graph.Authentication", "Microsoft.Graph.Groups", "Microsoft.Graph.Users"])}
 
-Connect-MgGraph -Scopes "Group.Read.All" -UseDeviceCode
+Connect-MgGraph -Scopes "Group.Read.All" -UseDeviceCode -NoWelcome
 
 try {
     $teams = Get-MgGroup -Filter "resourceProvisioningOptions/Any(x:x eq 'Team')" -All -Property DisplayName, Id, Description, CreatedDateTime
@@ -1978,7 +1978,7 @@ finally {
 
 ${moduleCheck(["Microsoft.Graph.Authentication", "Microsoft.Graph.Groups", "Microsoft.Graph.Users"])}
 
-Connect-MgGraph -Scopes "Group.Read.All" -UseDeviceCode
+Connect-MgGraph -Scopes "Group.Read.All" -UseDeviceCode -NoWelcome
 
 try {
     $teams = Get-MgGroup -Filter "resourceProvisioningOptions/Any(x:x eq 'Team')" -All -Property DisplayName, Id, Description, CreatedDateTime
@@ -2023,7 +2023,7 @@ finally {
 
 ${moduleCheck(["Microsoft.Graph.Authentication", "Microsoft.Graph.Identity.DirectoryManagement", "Microsoft.Graph.Users"])}
 
-Connect-MgGraph -Scopes "RoleManagement.Read.Directory" -UseDeviceCode
+Connect-MgGraph -Scopes "RoleManagement.Read.Directory" -UseDeviceCode -NoWelcome
 
 try {
     $roles = Get-MgDirectoryRole -All
@@ -2065,7 +2065,7 @@ finally {
 
 ${moduleCheck(["Microsoft.Graph.Authentication", "Microsoft.Graph.Identity.DirectoryManagement", "Microsoft.Graph.Users"])}
 
-Connect-MgGraph -Scopes "RoleManagement.Read.Directory" -UseDeviceCode
+Connect-MgGraph -Scopes "RoleManagement.Read.Directory" -UseDeviceCode -NoWelcome
 
 try {
     $roles = Get-MgDirectoryRole -All
@@ -2107,7 +2107,7 @@ finally {
 
 ${moduleCheck(["Microsoft.Graph.Authentication", "Microsoft.Graph.Users", "Microsoft.Graph.Identity.SignIns"])}
 
-Connect-MgGraph -Scopes "UserAuthenticationMethod.Read.All", "User.Read.All" -UseDeviceCode
+Connect-MgGraph -Scopes "UserAuthenticationMethod.Read.All", "User.Read.All" -UseDeviceCode -NoWelcome
 
 try {
     $users = Get-MgUser -All -Property DisplayName, UserPrincipalName, AccountEnabled -Filter "accountEnabled eq true"
@@ -2155,7 +2155,7 @@ finally {
 
 ${moduleCheck(["Microsoft.Graph.Authentication", "Microsoft.Graph.Users", "Microsoft.Graph.Identity.SignIns"])}
 
-Connect-MgGraph -Scopes "UserAuthenticationMethod.Read.All", "User.Read.All" -UseDeviceCode
+Connect-MgGraph -Scopes "UserAuthenticationMethod.Read.All", "User.Read.All" -UseDeviceCode -NoWelcome
 
 try {
     $users = Get-MgUser -All -Property DisplayName, UserPrincipalName, AccountEnabled -Filter "accountEnabled eq true"
@@ -2206,7 +2206,7 @@ finally {
 
 ${moduleCheck(["Microsoft.Graph.Authentication", "Microsoft.Graph.Identity.DirectoryManagement"])}
 
-Connect-MgGraph -Scopes "Organization.Read.All" -UseDeviceCode
+Connect-MgGraph -Scopes "Organization.Read.All" -UseDeviceCode -NoWelcome
 
 try {
     $subscriptions = Get-MgSubscribedSku -All
@@ -2248,7 +2248,7 @@ finally {
 
 ${moduleCheck(["Microsoft.Graph.Authentication", "Microsoft.Graph.Identity.DirectoryManagement"])}
 
-Connect-MgGraph -Scopes "Organization.Read.All" -UseDeviceCode
+Connect-MgGraph -Scopes "Organization.Read.All" -UseDeviceCode -NoWelcome
 
 try {
     $subscriptions = Get-MgSubscribedSku -All

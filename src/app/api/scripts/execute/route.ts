@@ -2,6 +2,10 @@ import { NextRequest, NextResponse } from "next/server";
 import { auth } from "@/auth";
 import { prisma } from "@/lib/prisma";
 import { spawn } from "child_process";
+import { writeFile, unlink } from "fs/promises";
+import { join } from "path";
+import { tmpdir } from "os";
+import { randomUUID } from "crypto";
 
 export async function POST(req: NextRequest) {
   const session = await auth();
@@ -59,7 +63,7 @@ export async function POST(req: NextRequest) {
     },
   });
 
-  // Build the PowerShell command with parameters
+  // Build the PowerShell script with parameters prepended
   let psScript = script.content;
 
   if (params && Object.keys(params).length > 0) {
@@ -68,6 +72,13 @@ export async function POST(req: NextRequest) {
       .join("\n");
     psScript = paramBlock + "\n\n" + psScript;
   }
+
+  // Write script to a temp file so pwsh can execute via -File.
+  // Using -File instead of -Command with stdin avoids a known issue where
+  // Format-Table and other formatting cmdlets hang or lose output when
+  // PowerShell reads a multiline script from stdin.
+  const scriptPath = join(tmpdir(), `ittools-${randomUUID()}.ps1`);
+  await writeFile(scriptPath, psScript, "utf-8");
 
   const timeoutMs = parseInt(process.env.SCRIPT_TIMEOUT_MS || "120000", 10);
   const executionId = execution.id;
@@ -91,10 +102,14 @@ export async function POST(req: NextRequest) {
         controller.close();
       }
 
+      function cleanup() {
+        unlink(scriptPath).catch(() => {});
+      }
+
       send("execution_id", executionId);
 
-      const ps = spawn("pwsh", ["-NoProfile", "-NonInteractive", "-Command", "-"], {
-        stdio: ["pipe", "pipe", "pipe"],
+      const ps = spawn("pwsh", ["-NoProfile", "-NonInteractive", "-File", scriptPath], {
+        stdio: ["ignore", "pipe", "pipe"],
         env: { ...process.env, TERM: "dumb", NO_COLOR: "1" },
       });
 
@@ -107,6 +122,7 @@ export async function POST(req: NextRequest) {
         if (!stdoutDone || !stderrDone || exitCode === null) return;
 
         clearTimeout(timer);
+        cleanup();
         const succeeded = exitCode === 0;
         const status = succeeded ? "SUCCESS" : "FAILED";
 
@@ -148,6 +164,7 @@ export async function POST(req: NextRequest) {
 
       const timer = setTimeout(() => {
         ps.kill("SIGTERM");
+        cleanup();
         send("error", `Script execution timed out after ${timeoutMs / 1000}s`);
         prisma.scriptExecution.update({
           where: { id: executionId },
@@ -169,6 +186,7 @@ export async function POST(req: NextRequest) {
 
       ps.on("error", (err) => {
         clearTimeout(timer);
+        cleanup();
         const message = `Failed to start PowerShell: ${err.message}`;
         send("error", message);
         prisma.scriptExecution.update({
@@ -183,10 +201,6 @@ export async function POST(req: NextRequest) {
           closeController();
         });
       });
-
-      // Write script to stdin and close
-      ps.stdin.write(psScript);
-      ps.stdin.end();
     },
   });
 
