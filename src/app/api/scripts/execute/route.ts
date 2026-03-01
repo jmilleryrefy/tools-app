@@ -78,9 +78,17 @@ export async function POST(req: NextRequest) {
       const encoder = new TextEncoder();
       let fullOutput = "";
       let fullStderr = "";
+      let closed = false;
 
       function send(event: string, data: string) {
+        if (closed) return;
         controller.enqueue(encoder.encode(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`));
+      }
+
+      function closeController() {
+        if (closed) return;
+        closed = true;
+        controller.close();
       }
 
       send("execution_id", executionId);
@@ -113,7 +121,7 @@ export async function POST(req: NextRequest) {
           },
         }).finally(() => {
           send("done", "FAILED");
-          controller.close();
+          closeController();
         });
       }, timeoutMs);
 
@@ -132,7 +140,7 @@ export async function POST(req: NextRequest) {
           },
         }).finally(() => {
           send("done", status);
-          controller.close();
+          closeController();
         });
       });
 
@@ -149,7 +157,7 @@ export async function POST(req: NextRequest) {
           },
         }).finally(() => {
           send("done", "FAILED");
-          controller.close();
+          closeController();
         });
       });
 
