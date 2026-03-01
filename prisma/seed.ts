@@ -1360,7 +1360,46 @@ async function main() {
 
   const script1 = await prisma.script.upsert({
     where: { slug: "get-all-licensed-users" },
-    update: {},
+    update: {
+      description: "Retrieves a list of all users in the tenant that have at least one license assigned. Outputs display name, UPN, and assigned license SKUs.",
+      tags: "users,licenses,audit",
+      content: `# Get All Licensed Users
+# Requires: Microsoft.Graph PowerShell module
+# Permissions: User.Read.All
+
+param(
+    [string]$ExportPath = ""
+)
+
+${moduleCheck(["Microsoft.Graph.Authentication", "Microsoft.Graph.Users"])}
+
+Connect-MgGraph -Scopes "User.Read.All" -UseDeviceCode
+
+try {
+    $users = Get-MgUser -All -Property DisplayName, UserPrincipalName, AssignedLicenses -Filter "assignedLicenses/\\$count ne 0" -ConsistencyLevel eventual -CountVariable count
+
+    $results = $users | ForEach-Object {
+        $licenseSkus = ($_.AssignedLicenses | ForEach-Object { $_.SkuId }) -join ", "
+        [PSCustomObject]@{
+            DisplayName       = $_.DisplayName
+            UserPrincipalName = $_.UserPrincipalName
+            LicenseSKUs       = $licenseSkus
+        }
+    }
+
+    $results | Format-Table -AutoSize
+
+    if ($ExportPath) {
+        $results | Export-Csv -Path $ExportPath -NoTypeInformation
+        Write-Host "Results exported to $ExportPath" -ForegroundColor Green
+    }
+
+    Write-Host "\\nTotal licensed users: $count" -ForegroundColor Cyan
+}
+finally {
+    Disconnect-MgGraph
+}`,
+    },
     create: {
       name: "Get All Licensed Users",
       slug: "get-all-licensed-users",
@@ -1424,7 +1463,48 @@ finally {
 
   await prisma.script.upsert({
     where: { slug: "bulk-password-reset" },
-    update: {},
+    update: {
+      description: "Resets passwords for a list of users from a CSV file. Generates temporary passwords and forces change on next login.",
+      tags: "users,passwords,bulk",
+      requiresAdmin: true,
+      content: `# Bulk Password Reset from CSV
+# Requires: Microsoft.Graph PowerShell module
+# Permissions: UserAuthenticationMethod.ReadWrite.All
+# CSV Format: UserPrincipalName column required
+
+param(
+    [Parameter(Mandatory=$true)]
+    [string]$CsvPath
+)
+
+${moduleCheck(["Microsoft.Graph.Authentication", "Microsoft.Graph.Users"])}
+
+Connect-MgGraph -Scopes "UserAuthenticationMethod.ReadWrite.All" -UseDeviceCode
+
+try {
+    $users = Import-Csv -Path $CsvPath
+
+    foreach ($user in $users) {
+        $upn = $user.UserPrincipalName
+        $tempPassword = -join ((65..90) + (97..122) + (48..57) + (33,35,36,37,42) | Get-Random -Count 16 | ForEach-Object { [char]$_ })
+
+        try {
+            $passwordProfile = @{
+                Password                      = $tempPassword
+                ForceChangePasswordNextSignIn  = $true
+            }
+            Update-MgUser -UserId $upn -PasswordProfile $passwordProfile
+            Write-Host "[OK] $upn - Temp password: $tempPassword" -ForegroundColor Green
+        }
+        catch {
+            Write-Host "[FAIL] $upn - $($_.Exception.Message)" -ForegroundColor Red
+        }
+    }
+}
+finally {
+    Disconnect-MgGraph
+}`,
+    },
     create: {
       name: "Bulk Password Reset",
       slug: "bulk-password-reset",
@@ -1474,7 +1554,57 @@ finally {
 
   await prisma.script.upsert({
     where: { slug: "disable-inactive-users" },
-    update: {},
+    update: {
+      description: "Finds and optionally disables user accounts that have not signed in for a specified number of days.",
+      tags: "users,inactive,cleanup,security",
+      requiresAdmin: true,
+      content: `# Disable Inactive Users
+# Requires: Microsoft.Graph PowerShell module
+# Permissions: User.ReadWrite.All, AuditLog.Read.All
+
+param(
+    [int]$InactiveDays = 90,
+    [switch]$WhatIf
+)
+
+${moduleCheck(["Microsoft.Graph.Authentication", "Microsoft.Graph.Users"])}
+
+Connect-MgGraph -Scopes "User.ReadWrite.All", "AuditLog.Read.All" -UseDeviceCode
+
+try {
+    $cutoffDate = (Get-Date).AddDays(-$InactiveDays).ToString("yyyy-MM-ddTHH:mm:ssZ")
+
+    # Note: Users who have NEVER signed in are not included in this filter.
+    # To include them, add: -or (-not $_.SignInActivity.LastSignInDateTime)
+    $inactiveUsers = Get-MgUser -All -Property DisplayName, UserPrincipalName, SignInActivity, AccountEnabled -Filter "accountEnabled eq true" |
+        Where-Object {
+            $_.SignInActivity.LastSignInDateTime -and
+            $_.SignInActivity.LastSignInDateTime -lt $cutoffDate
+        }
+
+    Write-Host "Found $($inactiveUsers.Count) users inactive for $InactiveDays+ days:" -ForegroundColor Yellow
+
+    foreach ($user in $inactiveUsers) {
+        $lastSignIn = $user.SignInActivity.LastSignInDateTime
+        Write-Host "  $($user.DisplayName) ($($user.UserPrincipalName)) - Last sign-in: $lastSignIn"
+
+        if (-not $WhatIf) {
+            try {
+                Update-MgUser -UserId $user.Id -AccountEnabled:$false
+                Write-Host "    -> Account disabled" -ForegroundColor Red
+            }
+            catch {
+                Write-Host "    -> [FAIL] $($_.Exception.Message)" -ForegroundColor Red
+            }
+        } else {
+            Write-Host "    -> [WhatIf] Would disable account" -ForegroundColor Cyan
+        }
+    }
+}
+finally {
+    Disconnect-MgGraph
+}`,
+    },
     create: {
       name: "Disable Inactive Users",
       slug: "disable-inactive-users",
@@ -1535,7 +1665,41 @@ finally {
 
   await prisma.script.upsert({
     where: { slug: "get-mailbox-sizes" },
-    update: {},
+    update: {
+      description: "Generates a report of all user mailbox sizes including item count and total size. Useful for storage auditing and planning.",
+      tags: "exchange,mailbox,storage,report",
+      content: `# Get All Mailbox Sizes Report
+# Requires: ExchangeOnlineManagement module
+# Permissions: Exchange Administrator
+
+${moduleCheck(["ExchangeOnlineManagement"])}
+
+Connect-ExchangeOnline -Device
+
+try {
+    $mailboxes = Get-EXOMailbox -ResultSize Unlimited -Properties DisplayName, UserPrincipalName
+
+    $report = $mailboxes | ForEach-Object {
+        $stats = Get-EXOMailboxStatistics -Identity $_.UserPrincipalName -ErrorAction SilentlyContinue
+        if ($stats) {
+            [PSCustomObject]@{
+                DisplayName  = $_.DisplayName
+                UPN          = $_.UserPrincipalName
+                ItemCount    = $stats.ItemCount
+                TotalSize    = $stats.TotalItemSize.Value.ToString()
+                TotalSizeBytes = $stats.TotalItemSize.Value.ToBytes()
+            }
+        }
+    }
+
+    $report | Sort-Object TotalSizeBytes -Descending | Format-Table DisplayName, UPN, ItemCount, TotalSize -AutoSize
+
+    Write-Host "\\nTotal mailboxes: $($report.Count)" -ForegroundColor Cyan
+}
+finally {
+    Disconnect-ExchangeOnline -Confirm:$false
+}`,
+    },
     create: {
       name: "Get Mailbox Sizes",
       slug: "get-mailbox-sizes",
@@ -1578,7 +1742,51 @@ finally {
 
   await prisma.script.upsert({
     where: { slug: "set-out-of-office" },
-    update: {},
+    update: {
+      description: "Configures automatic out-of-office reply for a specified user mailbox with internal and external messages.",
+      tags: "exchange,mailbox,ooo,auto-reply",
+      content: `# Set Out of Office Auto-Reply
+# Requires: ExchangeOnlineManagement module
+# Permissions: Exchange Administrator
+
+param(
+    [Parameter(Mandatory=$true)]
+    [string]$UserPrincipalName,
+
+    [Parameter(Mandatory=$true)]
+    [string]$InternalMessage,
+
+    [string]$ExternalMessage = "",
+
+    [datetime]$StartTime,
+    [datetime]$EndTime
+)
+
+${moduleCheck(["ExchangeOnlineManagement"])}
+
+Connect-ExchangeOnline -Device
+
+try {
+    $params = @{
+        Identity          = $UserPrincipalName
+        AutoReplyState    = "Scheduled"
+        InternalMessage   = $InternalMessage
+        ExternalMessage   = if ($ExternalMessage) { $ExternalMessage } else { $InternalMessage }
+        ExternalAudience  = "Known"
+    }
+
+    if ($StartTime) { $params.StartTime = $StartTime }
+    if ($EndTime)   { $params.EndTime = $EndTime }
+
+    Set-MailboxAutoReplyConfiguration @params
+
+    Write-Host "Out of office configured for $UserPrincipalName" -ForegroundColor Green
+    Get-MailboxAutoReplyConfiguration -Identity $UserPrincipalName | Format-List
+}
+finally {
+    Disconnect-ExchangeOnline -Confirm:$false
+}`,
+    },
     create: {
       name: "Set Out of Office Reply",
       slug: "set-out-of-office",
@@ -1633,7 +1841,45 @@ finally {
 
   await prisma.script.upsert({
     where: { slug: "get-site-storage-usage" },
-    update: {},
+    update: {
+      description: "Reports storage usage across all SharePoint Online sites. Identifies sites consuming the most storage.",
+      tags: "sharepoint,storage,audit,sites",
+      content: `# SharePoint Online Site Storage Report
+# Requires: PnP.PowerShell module
+# Permissions: SharePoint Administrator
+
+param(
+    [Parameter(Mandatory=$true)]
+    [string]$AdminUrl
+)
+
+${moduleCheck(["PnP.PowerShell"])}
+
+Connect-PnPOnline -Url $AdminUrl -DeviceLogin
+
+try {
+    $sites = Get-PnPTenantSite -Detailed | Where-Object { $_.Template -ne "SRCHCEN#0" }
+
+    $report = $sites | ForEach-Object {
+        [PSCustomObject]@{
+            Title         = $_.Title
+            Url           = $_.Url
+            StorageUsedMB = [math]::Round($_.StorageUsageCurrent, 2)
+            StorageQuotaMB = $_.StorageQuota
+            PercentUsed   = if ($_.StorageQuota -gt 0) { [math]::Round(($_.StorageUsageCurrent / $_.StorageQuota) * 100, 1) } else { 0 }
+            LastModified  = $_.LastContentModifiedDate
+        }
+    }
+
+    $report | Sort-Object StorageUsedMB -Descending | Format-Table -AutoSize
+
+    $totalGB = [math]::Round(($report | Measure-Object -Property StorageUsedMB -Sum).Sum / 1024, 2)
+    Write-Host "\\nTotal storage used: $totalGB GB across $($report.Count) sites" -ForegroundColor Cyan
+}
+finally {
+    Disconnect-PnPOnline
+}`,
+    },
     create: {
       name: "Get Site Storage Usage",
       slug: "get-site-storage-usage",
@@ -1682,7 +1928,44 @@ finally {
 
   await prisma.script.upsert({
     where: { slug: "get-teams-with-owners" },
-    update: {},
+    update: {
+      description: "Lists all Microsoft Teams along with their owners. Useful for governance auditing and identifying ownerless teams.",
+      tags: "teams,owners,governance,audit",
+      content: `# Get All Teams with Owners
+# Requires: Microsoft.Graph PowerShell module
+# Permissions: Group.Read.All
+
+${moduleCheck(["Microsoft.Graph.Authentication", "Microsoft.Graph.Groups", "Microsoft.Graph.Users"])}
+
+Connect-MgGraph -Scopes "Group.Read.All" -UseDeviceCode
+
+try {
+    $teams = Get-MgGroup -Filter "resourceProvisioningOptions/Any(x:x eq 'Team')" -All -Property DisplayName, Id, Description, CreatedDateTime
+
+    $report = foreach ($team in $teams) {
+        $owners = Get-MgGroupOwner -GroupId $team.Id -All | ForEach-Object {
+            $user = Get-MgUser -UserId $_.Id -Property DisplayName -ErrorAction SilentlyContinue
+            if ($user) { $user.DisplayName }
+        } | Where-Object { $_ }
+
+        [PSCustomObject]@{
+            TeamName    = $team.DisplayName
+            Description = $team.Description
+            Created     = $team.CreatedDateTime
+            Owners      = ($owners -join "; ")
+            OwnerCount  = @($owners).Count
+        }
+    }
+
+    $report | Format-Table TeamName, OwnerCount, Owners, Created -AutoSize
+
+    $ownerless = ($report | Where-Object { $_.OwnerCount -eq 0 }).Count
+    Write-Host "\\nTotal teams: $($report.Count) | Ownerless teams: $ownerless" -ForegroundColor $(if ($ownerless -gt 0) { "Yellow" } else { "Cyan" })
+}
+finally {
+    Disconnect-MgGraph
+}`,
+    },
     create: {
       name: "Get All Teams with Owners",
       slug: "get-teams-with-owners",
@@ -1730,7 +2013,45 @@ finally {
 
   await prisma.script.upsert({
     where: { slug: "audit-admin-role-assignments" },
-    update: {},
+    update: {
+      description: "Lists all users with administrative roles in the tenant. Critical for security auditing and principle of least privilege reviews.",
+      tags: "security,roles,admin,audit,compliance",
+      requiresAdmin: true,
+      content: `# Audit Admin Role Assignments
+# Requires: Microsoft.Graph PowerShell module
+# Permissions: RoleManagement.Read.Directory
+
+${moduleCheck(["Microsoft.Graph.Authentication", "Microsoft.Graph.Identity.DirectoryManagement", "Microsoft.Graph.Users"])}
+
+Connect-MgGraph -Scopes "RoleManagement.Read.Directory" -UseDeviceCode
+
+try {
+    $roles = Get-MgDirectoryRole -All
+
+    $report = foreach ($role in $roles) {
+        $members = Get-MgDirectoryRoleMember -DirectoryRoleId $role.Id -All
+
+        foreach ($member in $members) {
+            $user = Get-MgUser -UserId $member.Id -Property DisplayName, UserPrincipalName -ErrorAction SilentlyContinue
+            if ($user) {
+                [PSCustomObject]@{
+                    Role              = $role.DisplayName
+                    DisplayName       = $user.DisplayName
+                    UserPrincipalName = $user.UserPrincipalName
+                }
+            }
+        }
+    }
+
+    $report | Sort-Object Role, DisplayName | Format-Table -AutoSize
+
+    $uniqueAdmins = ($report | Select-Object -Property UserPrincipalName -Unique).Count
+    Write-Host "\\nTotal role assignments: $($report.Count) across $uniqueAdmins unique admin accounts" -ForegroundColor Cyan
+}
+finally {
+    Disconnect-MgGraph
+}`,
+    },
     create: {
       name: "Audit Admin Role Assignments",
       slug: "audit-admin-role-assignments",
@@ -1777,7 +2098,51 @@ finally {
 
   await prisma.script.upsert({
     where: { slug: "check-mfa-status" },
-    update: {},
+    update: {
+      description: "Reports the MFA registration and enforcement status for all users. Identifies users without MFA configured.",
+      tags: "security,mfa,compliance,audit",
+      content: `# Check MFA Registration Status
+# Requires: Microsoft.Graph PowerShell module
+# Permissions: UserAuthenticationMethod.Read.All, User.Read.All
+
+${moduleCheck(["Microsoft.Graph.Authentication", "Microsoft.Graph.Users", "Microsoft.Graph.Identity.SignIns"])}
+
+Connect-MgGraph -Scopes "UserAuthenticationMethod.Read.All", "User.Read.All" -UseDeviceCode
+
+try {
+    $users = Get-MgUser -All -Property DisplayName, UserPrincipalName, AccountEnabled -Filter "accountEnabled eq true"
+
+    $i = 0
+    $report = foreach ($user in $users) {
+        $i++
+        Write-Host "\\rChecking user $i of $($users.Count)..." -NoNewline
+        $methods = Get-MgUserAuthenticationMethod -UserId $user.Id
+
+        $hasMfa = ($methods | Where-Object {
+            $_.AdditionalProperties.'@odata.type' -ne '#microsoft.graph.passwordAuthenticationMethod'
+        }).Count -gt 0
+
+        [PSCustomObject]@{
+            DisplayName = $user.DisplayName
+            UPN         = $user.UserPrincipalName
+            MFAEnabled  = $hasMfa
+            MethodCount = $methods.Count
+            Methods     = ($methods | ForEach-Object { $_.AdditionalProperties.'@odata.type'.Split('.')[-1] }) -join ", "
+        }
+    }
+    Write-Host ""
+
+    $mfaEnabled = ($report | Where-Object { $_.MFAEnabled }).Count
+    $mfaDisabled = ($report | Where-Object { -not $_.MFAEnabled }).Count
+
+    $report | Format-Table DisplayName, UPN, MFAEnabled, Methods -AutoSize
+
+    Write-Host "\\nMFA Enabled: $mfaEnabled | MFA Not Configured: $mfaDisabled" -ForegroundColor $(if ($mfaDisabled -gt 0) { "Yellow" } else { "Green" })
+}
+finally {
+    Disconnect-MgGraph
+}`,
+    },
     create: {
       name: "Check MFA Status for All Users",
       slug: "check-mfa-status",
@@ -1832,7 +2197,45 @@ finally {
 
   await prisma.script.upsert({
     where: { slug: "license-utilization-report" },
-    update: {},
+    update: {
+      description: "Generates a comprehensive report of all license SKUs in the tenant showing total, assigned, and available counts. Helps identify unused licenses for cost optimization.",
+      tags: "licenses,reporting,cost,optimization",
+      content: `# License Utilization Report
+# Requires: Microsoft.Graph PowerShell module
+# Permissions: Organization.Read.All
+
+${moduleCheck(["Microsoft.Graph.Authentication", "Microsoft.Graph.Identity.DirectoryManagement"])}
+
+Connect-MgGraph -Scopes "Organization.Read.All" -UseDeviceCode
+
+try {
+    $subscriptions = Get-MgSubscribedSku -All
+
+    $report = $subscriptions | ForEach-Object {
+        $consumed = $_.ConsumedUnits
+        $total = $_.PrepaidUnits.Enabled
+        $available = $total - $consumed
+        $utilization = if ($total -gt 0) { [math]::Round(($consumed / $total) * 100, 1) } else { 0 }
+
+        [PSCustomObject]@{
+            SKU           = $_.SkuPartNumber
+            Total         = $total
+            Assigned      = $consumed
+            Available     = $available
+            Utilization   = "$utilization%"
+        }
+    }
+
+    $report | Sort-Object SKU | Format-Table -AutoSize
+
+    $totalLicenses = ($report | Measure-Object -Property Total -Sum).Sum
+    $totalAssigned = ($report | Measure-Object -Property Assigned -Sum).Sum
+    Write-Host "\\nOverall: $totalAssigned / $totalLicenses licenses assigned ($([math]::Round(($totalAssigned/$totalLicenses)*100,1))% utilization)" -ForegroundColor Cyan
+}
+finally {
+    Disconnect-MgGraph
+}`,
+    },
     create: {
       name: "License Utilization Report",
       slug: "license-utilization-report",
