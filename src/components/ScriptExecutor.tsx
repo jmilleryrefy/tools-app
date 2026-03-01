@@ -3,6 +3,12 @@
 import { useState, useRef } from "react";
 import { Play, Loader2, CheckCircle, XCircle } from "lucide-react";
 
+/** Strip ANSI/VT escape sequences from terminal output */
+function stripAnsi(text: string): string {
+  // eslint-disable-next-line no-control-regex
+  return text.replace(/\x1b\[[0-9;?]*[a-zA-Z]|\x1b\][^\x07]*\x07|\x1b\[\?[0-9;]*[hl]/g, "");
+}
+
 interface Parameter {
   id: string;
   name: string;
@@ -84,7 +90,7 @@ export default function ScriptExecutor({
             switch (currentEvent) {
               case "stdout":
               case "stderr":
-                setOutput((prev) => prev + data);
+                setOutput((prev) => prev + stripAnsi(data));
                 // Auto-scroll to bottom
                 if (outputRef.current) {
                   requestAnimationFrame(() => {

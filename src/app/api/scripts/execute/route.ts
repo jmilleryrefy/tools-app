@@ -95,7 +95,34 @@ export async function POST(req: NextRequest) {
 
       const ps = spawn("pwsh", ["-NoProfile", "-NonInteractive", "-Command", "-"], {
         stdio: ["pipe", "pipe", "pipe"],
+        env: { ...process.env, TERM: "dumb", NO_COLOR: "1" },
       });
+
+      let stdoutDone = false;
+      let stderrDone = false;
+      let exitCode: number | null = null;
+
+      function tryFinalize() {
+        // Only finalize once all streams are drained AND the process has exited
+        if (!stdoutDone || !stderrDone || exitCode === null) return;
+
+        clearTimeout(timer);
+        const succeeded = exitCode === 0;
+        const status = succeeded ? "SUCCESS" : "FAILED";
+
+        prisma.scriptExecution.update({
+          where: { id: executionId },
+          data: {
+            status,
+            output: fullOutput || (succeeded ? "(no output)" : undefined),
+            error: succeeded ? undefined : (fullStderr || `PowerShell exited with code ${exitCode}`),
+            endedAt: new Date(),
+          },
+        }).finally(() => {
+          send("done", status);
+          closeController();
+        });
+      }
 
       ps.stdout.on("data", (data: Buffer) => {
         const text = data.toString();
@@ -103,10 +130,20 @@ export async function POST(req: NextRequest) {
         send("stdout", text);
       });
 
+      ps.stdout.on("end", () => {
+        stdoutDone = true;
+        tryFinalize();
+      });
+
       ps.stderr.on("data", (data: Buffer) => {
         const text = data.toString();
         fullStderr += text;
         send("stderr", text);
+      });
+
+      ps.stderr.on("end", () => {
+        stderrDone = true;
+        tryFinalize();
       });
 
       const timer = setTimeout(() => {
@@ -126,22 +163,8 @@ export async function POST(req: NextRequest) {
       }, timeoutMs);
 
       ps.on("close", (code) => {
-        clearTimeout(timer);
-        const succeeded = code === 0;
-        const status = succeeded ? "SUCCESS" : "FAILED";
-
-        prisma.scriptExecution.update({
-          where: { id: executionId },
-          data: {
-            status,
-            output: fullOutput || (succeeded ? "(no output)" : undefined),
-            error: succeeded ? undefined : (fullStderr || `PowerShell exited with code ${code}`),
-            endedAt: new Date(),
-          },
-        }).finally(() => {
-          send("done", status);
-          closeController();
-        });
+        exitCode = code ?? 1;
+        tryFinalize();
       });
 
       ps.on("error", (err) => {
