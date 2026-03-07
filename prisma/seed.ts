@@ -1837,6 +1837,231 @@ finally {
     },
   });
 
+  // --- Exchange Online: Add Department to Distribution List ---
+
+  const addDeptToDLScript = await prisma.script.upsert({
+    where: { slug: "add-department-to-distribution-list" },
+    update: {
+      description:
+        "Adds all enabled, non-guest users from a specified department (via Microsoft Graph) to an Exchange Online distribution list. Skips users who are already members and reports a summary of added, skipped, and failed counts.",
+      tags: "exchange,distribution-list,department,bulk,graph",
+      requiresAdmin: true,
+      content: `# Add Department Users to Distribution List
+# Requires: Microsoft.Graph, ExchangeOnlineManagement modules
+# Permissions: User.Read.All (Graph), Exchange Administrator (EXO)
+#
+# Queries Microsoft Graph for all enabled, non-guest users in the specified
+# department, then adds each to the given Exchange Online distribution list.
+# Existing members are skipped gracefully.
+
+param(
+    [string]$Department = "Sales",
+    [string]$DistributionList = "studentloanadvocates@yrefy.com"
+)
+
+${moduleCheck(["Microsoft.Graph.Authentication", "Microsoft.Graph.Users", "ExchangeOnlineManagement"])}
+
+# ── Connect to services ──────────────────────────────────────────────────────
+Connect-MgGraph -Scopes "User.Read.All" -UseDeviceCode -NoWelcome
+Connect-ExchangeOnline -Device
+
+try {
+    # ── Validate the distribution list ────────────────────────────────────────
+    Write-Host "Validating DL exists in Exchange Online..." -ForegroundColor Cyan
+    $dl = Get-DistributionGroup -Identity $DistributionList -ErrorAction Stop
+    Write-Host ("Found DL: {0}  |  PrimarySmtp: {1}" -f $dl.DisplayName, $dl.PrimarySmtpAddress) -ForegroundColor Green
+
+    # ── Fetch users from Graph ────────────────────────────────────────────────
+    Write-Host "Fetching Graph users where Department = '$Department' ..." -ForegroundColor Cyan
+
+    $escaped = $Department.Replace("'", "''")
+    $filter  = "department eq '$escaped'"
+
+    $allUsers = Get-MgUser \`
+        -Filter $filter \`
+        -All \`
+        -Property "displayName,userPrincipalName,mail,department,accountEnabled,userType" \`
+        -ErrorAction Stop
+
+    $users = $allUsers | Where-Object {
+        $_.AccountEnabled -ne $false -and $_.UserType -ne "Guest"
+    }
+
+    if (-not $users -or @($users).Count -eq 0) {
+        Write-Warning "No enabled (non-guest) users found with department '$Department'. Nothing to do."
+        return
+    }
+
+    Write-Host ("Users found: {0}" -f @($users).Count) -ForegroundColor Green
+    $users | Select-Object displayName, userPrincipalName, mail, department | Format-Table -AutoSize
+
+    # ── Add each user to the DL ───────────────────────────────────────────────
+    $added   = 0
+    $skipped = 0
+    $failed  = 0
+
+    foreach ($u in $users) {
+        $addr = if (-not [string]::IsNullOrWhiteSpace($u.Mail)) { $u.Mail } else { $u.UserPrincipalName }
+
+        try {
+            Add-DistributionGroupMember -Identity $dl.Identity -Member $addr -ErrorAction Stop
+            $added++
+            Write-Host ("Added: {0} <{1}>" -f $u.DisplayName, $addr) -ForegroundColor Green
+        } catch {
+            $msg = $_.Exception.Message
+
+            if ($msg -match "is already a member" -or $msg -match "already.*member") {
+                $skipped++
+                Write-Host ("Skipped (already member): {0} <{1}>" -f $u.DisplayName, $addr) -ForegroundColor DarkYellow
+            } else {
+                $failed++
+                Write-Warning ("Failed to add {0} <{1}>: {2}" -f $u.DisplayName, $addr, $msg)
+            }
+        }
+    }
+
+    Write-Host ""
+    Write-Host "Done." -ForegroundColor Green
+    Write-Host ("Added:   {0}" -f $added)
+    Write-Host ("Skipped: {0}" -f $skipped)
+    Write-Host ("Failed:  {0}" -f $failed)
+}
+finally {
+    Disconnect-MgGraph
+    Disconnect-ExchangeOnline -Confirm:\\$false
+}`,
+    },
+    create: {
+      name: "Add Department to Distribution List",
+      slug: "add-department-to-distribution-list",
+      description:
+        "Adds all enabled, non-guest users from a specified department (via Microsoft Graph) to an Exchange Online distribution list. Skips users who are already members and reports a summary of added, skipped, and failed counts.",
+      categoryId: mailbox.id,
+      tags: "exchange,distribution-list,department,bulk,graph",
+      requiresAdmin: true,
+      content: `# Add Department Users to Distribution List
+# Requires: Microsoft.Graph, ExchangeOnlineManagement modules
+# Permissions: User.Read.All (Graph), Exchange Administrator (EXO)
+#
+# Queries Microsoft Graph for all enabled, non-guest users in the specified
+# department, then adds each to the given Exchange Online distribution list.
+# Existing members are skipped gracefully.
+
+param(
+    [string]$Department = "Sales",
+    [string]$DistributionList = "studentloanadvocates@yrefy.com"
+)
+
+${moduleCheck(["Microsoft.Graph.Authentication", "Microsoft.Graph.Users", "ExchangeOnlineManagement"])}
+
+# ── Connect to services ──────────────────────────────────────────────────────
+Connect-MgGraph -Scopes "User.Read.All" -UseDeviceCode -NoWelcome
+Connect-ExchangeOnline -Device
+
+try {
+    # ── Validate the distribution list ────────────────────────────────────────
+    Write-Host "Validating DL exists in Exchange Online..." -ForegroundColor Cyan
+    $dl = Get-DistributionGroup -Identity $DistributionList -ErrorAction Stop
+    Write-Host ("Found DL: {0}  |  PrimarySmtp: {1}" -f $dl.DisplayName, $dl.PrimarySmtpAddress) -ForegroundColor Green
+
+    # ── Fetch users from Graph ────────────────────────────────────────────────
+    Write-Host "Fetching Graph users where Department = '$Department' ..." -ForegroundColor Cyan
+
+    $escaped = $Department.Replace("'", "''")
+    $filter  = "department eq '$escaped'"
+
+    $allUsers = Get-MgUser \`
+        -Filter $filter \`
+        -All \`
+        -Property "displayName,userPrincipalName,mail,department,accountEnabled,userType" \`
+        -ErrorAction Stop
+
+    $users = $allUsers | Where-Object {
+        $_.AccountEnabled -ne $false -and $_.UserType -ne "Guest"
+    }
+
+    if (-not $users -or @($users).Count -eq 0) {
+        Write-Warning "No enabled (non-guest) users found with department '$Department'. Nothing to do."
+        return
+    }
+
+    Write-Host ("Users found: {0}" -f @($users).Count) -ForegroundColor Green
+    $users | Select-Object displayName, userPrincipalName, mail, department | Format-Table -AutoSize
+
+    # ── Add each user to the DL ───────────────────────────────────────────────
+    $added   = 0
+    $skipped = 0
+    $failed  = 0
+
+    foreach ($u in $users) {
+        $addr = if (-not [string]::IsNullOrWhiteSpace($u.Mail)) { $u.Mail } else { $u.UserPrincipalName }
+
+        try {
+            Add-DistributionGroupMember -Identity $dl.Identity -Member $addr -ErrorAction Stop
+            $added++
+            Write-Host ("Added: {0} <{1}>" -f $u.DisplayName, $addr) -ForegroundColor Green
+        } catch {
+            $msg = $_.Exception.Message
+
+            if ($msg -match "is already a member" -or $msg -match "already.*member") {
+                $skipped++
+                Write-Host ("Skipped (already member): {0} <{1}>" -f $u.DisplayName, $addr) -ForegroundColor DarkYellow
+            } else {
+                $failed++
+                Write-Warning ("Failed to add {0} <{1}>: {2}" -f $u.DisplayName, $addr, $msg)
+            }
+        }
+    }
+
+    Write-Host ""
+    Write-Host "Done." -ForegroundColor Green
+    Write-Host ("Added:   {0}" -f $added)
+    Write-Host ("Skipped: {0}" -f $skipped)
+    Write-Host ("Failed:  {0}" -f $failed)
+}
+finally {
+    Disconnect-MgGraph
+    Disconnect-ExchangeOnline -Confirm:\\$false
+}`,
+    },
+  });
+
+  const addDeptToDLParams = [
+    {
+      id: "param-add-dept-dl-department",
+      name: "Department",
+      label: "Department",
+      type: "STRING" as const,
+      required: false,
+      defaultValue: "Sales",
+      description:
+        "The Entra ID department attribute to filter users by (e.g. Sales, Operations, Engineering)",
+      sortOrder: 1,
+    },
+    {
+      id: "param-add-dept-dl-distrolist",
+      name: "DistributionList",
+      label: "Distribution List",
+      type: "STRING" as const,
+      required: false,
+      defaultValue: "studentloanadvocates@yrefy.com",
+      description:
+        "The distribution list to add users to (display name or email address)",
+      sortOrder: 2,
+    },
+  ];
+
+  for (const param of addDeptToDLParams) {
+    await prisma.scriptParameter.upsert({
+      where: { id: param.id },
+      update: {},
+      create: {
+        ...param,
+        scriptId: addDeptToDLScript.id,
+      },
+    });
+  }
+
   // --- SharePoint Online Scripts ---
 
   await prisma.script.upsert({
@@ -2346,7 +2571,7 @@ finally {
 
   console.log("Seed completed successfully!");
   console.log("  Categories: 7");
-  console.log("  Scripts: 11");
+  console.log("  Scripts: 12");
 }
 
 main()
