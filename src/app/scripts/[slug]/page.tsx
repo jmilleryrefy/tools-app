@@ -1,6 +1,6 @@
 import Navbar from "@/components/Navbar";
-import CodeBlock from "@/components/CodeBlock";
 import CopyButton from "@/components/CopyButton";
+import CollapsibleCodeBlock from "@/components/CollapsibleCodeBlock";
 import ScriptExecutor from "@/components/ScriptExecutor";
 import { auth } from "@/auth";
 import { prisma } from "@/lib/prisma";
@@ -106,16 +106,8 @@ export default async function ScriptDetailPage({
           )}
         </div>
 
-        {/* Script Content */}
-        <div className="mb-8">
-          <h2 className="text-lg font-semibold text-white mb-3">
-            Script Content
-          </h2>
-          <CodeBlock code={script.content} />
-        </div>
-
         {/* Execution Section */}
-        <div>
+        <div className="mb-8">
           <h2 className="text-lg font-semibold text-white mb-3">
             Execute Script
           </h2>
@@ -123,6 +115,11 @@ export default async function ScriptDetailPage({
             scriptId={script.id}
             parameters={script.parameters}
           />
+        </div>
+
+        {/* Script Content (collapsible, starts closed) */}
+        <div className="mb-8">
+          <CollapsibleCodeBlock code={script.content} />
         </div>
       </main>
     </div>

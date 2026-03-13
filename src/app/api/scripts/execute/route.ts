@@ -7,6 +7,36 @@ import { join } from "path";
 import { tmpdir } from "os";
 import { randomUUID } from "crypto";
 
+/**
+ * Remove the top-level param(...) block from a PowerShell script string.
+ * Handles nested parentheses (e.g. [Parameter(Mandatory=$true)]) by
+ * tracking balanced open/close parens rather than using a simple regex.
+ */
+function stripParamBlock(script: string): string {
+  const match = script.match(/\bparam\s*\(/);
+  if (!match || match.index === undefined) return script;
+
+  const start = match.index;
+  // Begin counting from the opening '(' that follows 'param'
+  let i = start + match[0].length;
+  let depth = 1;
+
+  while (i < script.length && depth > 0) {
+    if (script[i] === "(") depth++;
+    else if (script[i] === ")") depth--;
+    i++;
+  }
+
+  if (depth !== 0) return script; // unbalanced – leave script untouched
+
+  // Also consume any trailing whitespace/newline after the closing ')'
+  while (i < script.length && (script[i] === " " || script[i] === "\t")) i++;
+  if (i < script.length && script[i] === "\r") i++;
+  if (i < script.length && script[i] === "\n") i++;
+
+  return script.slice(0, start) + script.slice(i);
+}
+
 export async function POST(req: NextRequest) {
   const session = await auth();
 
@@ -70,6 +100,11 @@ export async function POST(req: NextRequest) {
     const paramBlock = Object.entries(params)
       .map(([key, value]) => `$${key} = "${String(value).replace(/"/g, '`"')}"`)
       .join("\n");
+    // Remove any existing param() block so the prepended variable assignments
+    // don't cause a ParserError (param() must be the first executable statement).
+    // We match balanced parentheses to handle nested constructs like
+    // [Parameter(Mandatory=$true)] inside the param block.
+    psScript = stripParamBlock(psScript);
     psScript = paramBlock + "\n\n" + psScript;
   }
 
