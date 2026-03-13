@@ -322,6 +322,29 @@ function Test-UserExists {
     catch { return $false }
 }
 
+function Get-ExistingUpnSet {
+    param([array]$UPNs)
+    # Batch-check UPNs against the tenant in groups of 15 (OData filter length limit).
+    $existingSet = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+    $batchSize = 15
+    for ($i = 0; $i -lt $UPNs.Count; $i += $batchSize) {
+        $batch = $UPNs[$i..[Math]::Min($i + $batchSize - 1, $UPNs.Count - 1)]
+        $clauses = ($batch | ForEach-Object { "userPrincipalName eq '$_'" }) -join " or "
+        try {
+            $found = Get-MgUser -Filter $clauses -Property "userPrincipalName" -ErrorAction Stop
+            foreach ($u in $found) {
+                [void]$existingSet.Add($u.UserPrincipalName)
+            }
+        } catch {
+            # Fallback: check individually if batch filter fails
+            foreach ($upn in $batch) {
+                if (Test-UserExists -UPN $upn) { [void]$existingSet.Add($upn) }
+            }
+        }
+    }
+    return $existingSet
+}
+
 function Get-ManagerUser {
     param([string]$ManagerInput)
     if ($ManagerInput -match "@") {
@@ -862,11 +885,14 @@ while (-not $phase3Done) {
 
 Write-Phase -Number 4 -Title "DUPLICATE CHECK"
 Write-Host ""
-Write-Host "Checking each UPN against existing tenant users..." -ForegroundColor White
+Write-Host "Checking UPNs against existing tenant users (batch query)..." -ForegroundColor White
+
+$allUpns = @($roster | ForEach-Object { $_.UPN })
+$existingUpns = Get-ExistingUpnSet -UPNs $allUpns
 
 $dupCount = 0
 foreach ($u in $roster) {
-    $exists = Test-UserExists -UPN $u.UPN
+    $exists = $existingUpns.Contains($u.UPN)
     $u.Duplicate = $exists
     if ($exists) {
         $dupCount++
@@ -930,6 +956,9 @@ Write-Phase -Number 5 -Title "MANAGER LOOKUP"
 Write-Host ""
 Write-Host "Looking up managers in the tenant..." -ForegroundColor White
 
+# Cache manager lookups to avoid redundant API calls when multiple users share a manager
+$mgrCache = @{}
+
 foreach ($u in $roster) {
     if ($u.Duplicate) { continue }
     if (-not $u.Manager -or $u.Manager -eq "") {
@@ -939,15 +968,30 @@ foreach ($u in $roster) {
         continue
     }
 
+    $cacheKey = $u.Manager.Trim().ToLower()
+    if ($mgrCache.ContainsKey($cacheKey)) {
+        $cached = $mgrCache[$cacheKey]
+        $u.ManagerUPN  = $cached.UPN
+        $u.ManagerName = $cached.Name
+        if ($cached.UPN -eq "NOT FOUND") {
+            Write-Host "  $($u.DisplayName) -> '$($u.Manager)' NOT FOUND (cached)" -ForegroundColor Red
+        } else {
+            Write-Host "  $($u.DisplayName) -> $($cached.Name) ($($cached.UPN)) (cached)" -ForegroundColor Green
+        }
+        continue
+    }
+
     $mgr = Get-ManagerUser -ManagerInput $u.Manager
     if ($mgr) {
         $u.ManagerUPN  = $mgr.UserPrincipalName
         $u.ManagerName = $mgr.DisplayName
+        $mgrCache[$cacheKey] = @{ UPN = $mgr.UserPrincipalName; Name = $mgr.DisplayName }
         Write-Host "  $($u.DisplayName) -> $($mgr.DisplayName) ($($mgr.UserPrincipalName))" -ForegroundColor Green
     }
     else {
         $u.ManagerUPN  = "NOT FOUND"
         $u.ManagerName = "NOT FOUND"
+        $mgrCache[$cacheKey] = @{ UPN = "NOT FOUND"; Name = "NOT FOUND" }
         Write-Host "  $($u.DisplayName) -> '$($u.Manager)' NOT FOUND" -ForegroundColor Red
     }
 }
@@ -1895,12 +1939,47 @@ try {
     Write-Host ("Users found: {0}" -f @($users).Count) -ForegroundColor Green
     $users | Select-Object displayName, userPrincipalName, mail, department | Format-Table -AutoSize
 
-    # ── Add each user to the DL ───────────────────────────────────────────────
-    $added   = 0
-    $skipped = 0
-    $failed  = 0
+    # ── Pre-load existing DL members (bulk) ──────────────────────────────────
+    Write-Host "Loading current DL members (bulk fetch)..." -ForegroundColor Cyan
+    $existingMembers = Get-DistributionGroupMember -Identity $dl.Identity -ResultSize Unlimited -ErrorAction Stop
+    $existingSet = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+    foreach ($m in $existingMembers) {
+        if ($m.PrimarySmtpAddress) { [void]$existingSet.Add($m.PrimarySmtpAddress) }
+        if ($m.WindowsLiveID)      { [void]$existingSet.Add($m.WindowsLiveID) }
+    }
+    Write-Host ("Existing DL members loaded: {0}" -f $existingSet.Count) -ForegroundColor Green
+
+    # ── Classify users locally ────────────────────────────────────────────────
+    $toAdd   = [System.Collections.Generic.List[object]]::new()
+    $toSkip  = [System.Collections.Generic.List[object]]::new()
+    $noMail  = [System.Collections.Generic.List[object]]::new()
 
     foreach ($u in $users) {
+        $addr = if (-not [string]::IsNullOrWhiteSpace($u.Mail)) { $u.Mail } else { $u.UserPrincipalName }
+        if ([string]::IsNullOrWhiteSpace($u.Mail)) { $noMail.Add($u) }
+        if ($existingSet.Contains($addr)) { $toSkip.Add($u) } else { $toAdd.Add($u) }
+    }
+
+    if ($noMail.Count -gt 0) {
+        Write-Host ""
+        Write-Host ("Note: {0} user(s) have no Mail attribute (using UPN instead):" -f $noMail.Count) -ForegroundColor Yellow
+        foreach ($u in $noMail) { Write-Host ("  - {0} <{1}>" -f $u.DisplayName, $u.UserPrincipalName) -ForegroundColor Yellow }
+    }
+
+    Write-Host ""
+    Write-Host ("Already members (skipping): {0}" -f $toSkip.Count) -ForegroundColor DarkYellow
+    Write-Host ("To be added:               {0}" -f $toAdd.Count) -ForegroundColor Cyan
+
+    if ($toAdd.Count -eq 0) {
+        Write-Host "All users are already members. Nothing to do." -ForegroundColor Green
+        return
+    }
+
+    # ── Only make API calls for new additions ─────────────────────────────────
+    $added  = 0
+    $failed = 0
+
+    foreach ($u in $toAdd) {
         $addr = if (-not [string]::IsNullOrWhiteSpace($u.Mail)) { $u.Mail } else { $u.UserPrincipalName }
 
         try {
@@ -1908,23 +1987,17 @@ try {
             $added++
             Write-Host ("Added: {0} <{1}>" -f $u.DisplayName, $addr) -ForegroundColor Green
         } catch {
-            $msg = $_.Exception.Message
-
-            if ($msg -match "is already a member" -or $msg -match "already.*member") {
-                $skipped++
-                Write-Host ("Skipped (already member): {0} <{1}>" -f $u.DisplayName, $addr) -ForegroundColor DarkYellow
-            } else {
-                $failed++
-                Write-Warning ("Failed to add {0} <{1}>: {2}" -f $u.DisplayName, $addr, $msg)
-            }
+            $failed++
+            Write-Warning ("Failed to add {0} <{1}>: {2}" -f $u.DisplayName, $addr, $_.Exception.Message)
         }
     }
 
     Write-Host ""
     Write-Host "Done." -ForegroundColor Green
-    Write-Host ("Added:   {0}" -f $added)
-    Write-Host ("Skipped: {0}" -f $skipped)
-    Write-Host ("Failed:  {0}" -f $failed)
+    Write-Host ("Added:            {0}" -f $added)
+    Write-Host ("Already members:  {0}" -f $toSkip.Count)
+    Write-Host ("Failed:           {0}" -f $failed)
+    Write-Host ("No Mail (used UPN): {0}" -f $noMail.Count)
 }
 finally {
     Disconnect-MgGraph
@@ -1988,12 +2061,47 @@ try {
     Write-Host ("Users found: {0}" -f @($users).Count) -ForegroundColor Green
     $users | Select-Object displayName, userPrincipalName, mail, department | Format-Table -AutoSize
 
-    # ── Add each user to the DL ───────────────────────────────────────────────
-    $added   = 0
-    $skipped = 0
-    $failed  = 0
+    # ── Pre-load existing DL members (bulk) ──────────────────────────────────
+    Write-Host "Loading current DL members (bulk fetch)..." -ForegroundColor Cyan
+    $existingMembers = Get-DistributionGroupMember -Identity $dl.Identity -ResultSize Unlimited -ErrorAction Stop
+    $existingSet = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+    foreach ($m in $existingMembers) {
+        if ($m.PrimarySmtpAddress) { [void]$existingSet.Add($m.PrimarySmtpAddress) }
+        if ($m.WindowsLiveID)      { [void]$existingSet.Add($m.WindowsLiveID) }
+    }
+    Write-Host ("Existing DL members loaded: {0}" -f $existingSet.Count) -ForegroundColor Green
+
+    # ── Classify users locally ────────────────────────────────────────────────
+    $toAdd   = [System.Collections.Generic.List[object]]::new()
+    $toSkip  = [System.Collections.Generic.List[object]]::new()
+    $noMail  = [System.Collections.Generic.List[object]]::new()
 
     foreach ($u in $users) {
+        $addr = if (-not [string]::IsNullOrWhiteSpace($u.Mail)) { $u.Mail } else { $u.UserPrincipalName }
+        if ([string]::IsNullOrWhiteSpace($u.Mail)) { $noMail.Add($u) }
+        if ($existingSet.Contains($addr)) { $toSkip.Add($u) } else { $toAdd.Add($u) }
+    }
+
+    if ($noMail.Count -gt 0) {
+        Write-Host ""
+        Write-Host ("Note: {0} user(s) have no Mail attribute (using UPN instead):" -f $noMail.Count) -ForegroundColor Yellow
+        foreach ($u in $noMail) { Write-Host ("  - {0} <{1}>" -f $u.DisplayName, $u.UserPrincipalName) -ForegroundColor Yellow }
+    }
+
+    Write-Host ""
+    Write-Host ("Already members (skipping): {0}" -f $toSkip.Count) -ForegroundColor DarkYellow
+    Write-Host ("To be added:               {0}" -f $toAdd.Count) -ForegroundColor Cyan
+
+    if ($toAdd.Count -eq 0) {
+        Write-Host "All users are already members. Nothing to do." -ForegroundColor Green
+        return
+    }
+
+    # ── Only make API calls for new additions ─────────────────────────────────
+    $added  = 0
+    $failed = 0
+
+    foreach ($u in $toAdd) {
         $addr = if (-not [string]::IsNullOrWhiteSpace($u.Mail)) { $u.Mail } else { $u.UserPrincipalName }
 
         try {
@@ -2001,23 +2109,17 @@ try {
             $added++
             Write-Host ("Added: {0} <{1}>" -f $u.DisplayName, $addr) -ForegroundColor Green
         } catch {
-            $msg = $_.Exception.Message
-
-            if ($msg -match "is already a member" -or $msg -match "already.*member") {
-                $skipped++
-                Write-Host ("Skipped (already member): {0} <{1}>" -f $u.DisplayName, $addr) -ForegroundColor DarkYellow
-            } else {
-                $failed++
-                Write-Warning ("Failed to add {0} <{1}>: {2}" -f $u.DisplayName, $addr, $msg)
-            }
+            $failed++
+            Write-Warning ("Failed to add {0} <{1}>: {2}" -f $u.DisplayName, $addr, $_.Exception.Message)
         }
     }
 
     Write-Host ""
     Write-Host "Done." -ForegroundColor Green
-    Write-Host ("Added:   {0}" -f $added)
-    Write-Host ("Skipped: {0}" -f $skipped)
-    Write-Host ("Failed:  {0}" -f $failed)
+    Write-Host ("Added:            {0}" -f $added)
+    Write-Host ("Already members:  {0}" -f $toSkip.Count)
+    Write-Host ("Failed:           {0}" -f $failed)
+    Write-Host ("No Mail (used UPN): {0}" -f $noMail.Count)
 }
 finally {
     Disconnect-MgGraph
@@ -2168,9 +2270,10 @@ try {
     $teams = Get-MgGroup -Filter "resourceProvisioningOptions/Any(x:x eq 'Team')" -All -Property DisplayName, Id, Description, CreatedDateTime
 
     $report = foreach ($team in $teams) {
-        $owners = Get-MgGroupOwner -GroupId $team.Id -All | ForEach-Object {
-            $user = Get-MgUser -UserId $_.Id -Property DisplayName -ErrorAction SilentlyContinue
-            if ($user) { $user.DisplayName }
+        $ownerRefs = Get-MgGroupOwner -GroupId $team.Id -All
+        $owners = $ownerRefs | ForEach-Object {
+            # The owner object includes AdditionalProperties with displayName
+            $_.AdditionalProperties["displayName"]
         } | Where-Object { $_ }
 
         [PSCustomObject]@{
@@ -2209,9 +2312,10 @@ try {
     $teams = Get-MgGroup -Filter "resourceProvisioningOptions/Any(x:x eq 'Team')" -All -Property DisplayName, Id, Description, CreatedDateTime
 
     $report = foreach ($team in $teams) {
-        $owners = Get-MgGroupOwner -GroupId $team.Id -All | ForEach-Object {
-            $user = Get-MgUser -UserId $_.Id -Property DisplayName -ErrorAction SilentlyContinue
-            if ($user) { $user.DisplayName }
+        $ownerRefs = Get-MgGroupOwner -GroupId $team.Id -All
+        $owners = $ownerRefs | ForEach-Object {
+            # The owner object includes AdditionalProperties with displayName
+            $_.AdditionalProperties["displayName"]
         } | Where-Object { $_ }
 
         [PSCustomObject]@{

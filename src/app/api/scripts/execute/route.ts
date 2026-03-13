@@ -9,11 +9,26 @@ import { randomUUID } from "crypto";
 
 /**
  * Remove the top-level param(...) block from a PowerShell script string.
- * Handles nested parentheses (e.g. [Parameter(Mandatory=$true)]) by
- * tracking balanced open/close parens rather than using a simple regex.
+ * Handles nested parentheses (e.g. [Parameter(Mandatory=$true)]) and
+ * skips parentheses inside quoted strings and comments so that default
+ * values like "Hello (world)" don't break the matching.
  */
 function stripParamBlock(script: string): string {
-  const match = script.match(/\bparam\s*\(/);
+  // Only match a top-level param — skip any that appear inside comments.
+  // Walk backwards from the match to verify the line isn't a comment.
+  let searchFrom = 0;
+  let match: RegExpExecArray | null;
+  const paramRe = /\bparam\s*\(/g;
+
+  while ((match = paramRe.exec(script)) !== null) {
+    const lineStart = script.lastIndexOf("\n", match.index) + 1;
+    const prefix = script.slice(lineStart, match.index).trim();
+    if (!prefix.startsWith("#")) break; // not inside a comment
+    searchFrom = match.index + match[0].length;
+    paramRe.lastIndex = searchFrom;
+    match = null;
+  }
+
   if (!match || match.index === undefined) return script;
 
   const start = match.index;
@@ -22,8 +37,35 @@ function stripParamBlock(script: string): string {
   let depth = 1;
 
   while (i < script.length && depth > 0) {
-    if (script[i] === "(") depth++;
-    else if (script[i] === ")") depth--;
+    const ch = script[i];
+
+    // Skip single-line comments
+    if (ch === "#") {
+      while (i < script.length && script[i] !== "\n") i++;
+      continue;
+    }
+
+    // Skip double-quoted strings (PowerShell uses backtick for escapes)
+    if (ch === '"') {
+      i++;
+      while (i < script.length && script[i] !== '"') {
+        if (script[i] === "`") i++; // skip escaped char
+        i++;
+      }
+      i++; // move past closing quote
+      continue;
+    }
+
+    // Skip single-quoted strings (no escape sequences in PS single-quotes)
+    if (ch === "'") {
+      i++;
+      while (i < script.length && script[i] !== "'") i++;
+      i++; // move past closing quote
+      continue;
+    }
+
+    if (ch === "(") depth++;
+    else if (ch === ")") depth--;
     i++;
   }
 
@@ -53,32 +95,32 @@ export async function POST(req: NextRequest) {
     );
   }
 
-  // Fetch the script
-  const script = await prisma.script.findUnique({
-    where: { id: scriptId },
-    include: { parameters: true },
-  });
+  // Fetch the script and user role in parallel to reduce latency
+  const [script, dbUser] = await Promise.all([
+    prisma.script.findUnique({
+      where: { id: scriptId },
+      include: { parameters: true },
+    }),
+    prisma.user.findUnique({
+      where: { id: session.user.id },
+      select: { role: true },
+    }),
+  ]);
 
   if (!script || !script.isActive) {
     return NextResponse.json({ error: "Script not found" }, { status: 404 });
   }
 
-  // Check role permissions for admin scripts
-  const dbUser = await prisma.user.findUnique({
-    where: { id: session.user.id },
-    select: { role: true },
-  });
-
-  if (script.requiresAdmin && dbUser?.role !== "ADMIN") {
+  if (dbUser?.role === "VIEWER") {
     return NextResponse.json(
-      { error: "This script requires admin privileges" },
+      { error: "Your role does not permit script execution. Contact an admin to upgrade your role." },
       { status: 403 }
     );
   }
 
-  if (dbUser?.role === "VIEWER") {
+  if (script.requiresAdmin && dbUser?.role !== "ADMIN") {
     return NextResponse.json(
-      { error: "Your role does not permit script execution. Contact an admin to upgrade your role." },
+      { error: "This script requires admin privileges" },
       { status: 403 }
     );
   }
@@ -199,6 +241,11 @@ export async function POST(req: NextRequest) {
 
       const timer = setTimeout(() => {
         ps.kill("SIGTERM");
+        // If SIGTERM doesn't kill the process tree within 5s, force-kill
+        const killTimer = setTimeout(() => {
+          try { ps.kill("SIGKILL"); } catch {}
+        }, 5000);
+        ps.on("close", () => clearTimeout(killTimer));
         cleanup();
         send("error", `Script execution timed out after ${timeoutMs / 1000}s`);
         prisma.scriptExecution.update({

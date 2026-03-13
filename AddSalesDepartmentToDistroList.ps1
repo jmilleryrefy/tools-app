@@ -75,8 +75,7 @@ if (-not $users -or $users.Count -eq 0) {
 }
 
 Write-Host ("Users found: {0}" -f $users.Count) -ForegroundColor Green
-Write-Host "Preview (first 10):" -ForegroundColor Gray
-$users | Select-Object -First 10 displayName, userPrincipalName, mail, department | Format-Table -AutoSize
+$users | Select-Object displayName, userPrincipalName, mail | Format-Table -AutoSize
 
 $confirm = Read-Host "Add these users to DL '$($dl.PrimarySmtpAddress)'? Type YES to proceed"
 if ($confirm -ne "YES") {
@@ -84,12 +83,58 @@ if ($confirm -ne "YES") {
     return
 }
 
-# No membership pre-load. Just attempt adds and handle duplicates.
-$added = 0
-$skipped = 0
-$failed = 0
+# Pre-load existing DL members so we only make API calls for new additions.
+Write-Host "Loading current DL members (bulk fetch)..." -ForegroundColor Cyan
+$existingMembers = Get-DistributionGroupMember -Identity $dl.Identity -ResultSize Unlimited -ErrorAction Stop
+$existingSet = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+foreach ($m in $existingMembers) {
+    if ($m.PrimarySmtpAddress) { [void]$existingSet.Add($m.PrimarySmtpAddress) }
+    if ($m.WindowsLiveID)      { [void]$existingSet.Add($m.WindowsLiveID) }
+}
+Write-Host ("Existing DL members loaded: {0}" -f $existingSet.Count) -ForegroundColor Green
+
+# Separate users into those needing adds vs already members.
+$toAdd   = [System.Collections.Generic.List[object]]::new()
+$toSkip  = [System.Collections.Generic.List[object]]::new()
+$noMail  = [System.Collections.Generic.List[object]]::new()
 
 foreach ($u in $users) {
+    $addr = Get-TargetRecipientAddress -User $u
+
+    if ([string]::IsNullOrWhiteSpace($u.Mail)) {
+        $noMail.Add($u)
+    }
+
+    if ($existingSet.Contains($addr)) {
+        $toSkip.Add($u)
+    } else {
+        $toAdd.Add($u)
+    }
+}
+
+# Report users with no Mail attribute.
+if ($noMail.Count -gt 0) {
+    Write-Host ""
+    Write-Host ("Note: {0} user(s) have no Mail attribute (using UPN instead):" -f $noMail.Count) -ForegroundColor Yellow
+    foreach ($u in $noMail) {
+        Write-Host ("  - {0} <{1}>" -f $u.DisplayName, $u.UserPrincipalName) -ForegroundColor Yellow
+    }
+}
+
+Write-Host ""
+Write-Host ("Already members (skipping): {0}" -f $toSkip.Count) -ForegroundColor DarkYellow
+Write-Host ("To be added:               {0}" -f $toAdd.Count) -ForegroundColor Cyan
+
+if ($toAdd.Count -eq 0) {
+    Write-Host "All users are already members. Nothing to do." -ForegroundColor Green
+    return
+}
+
+# Only make API calls for users that actually need to be added.
+$added  = 0
+$failed = 0
+
+foreach ($u in $toAdd) {
     $addr = Get-TargetRecipientAddress -User $u
 
     try {
@@ -98,19 +143,14 @@ foreach ($u in $users) {
         Write-Host ("Added: {0} <{1}>" -f $u.DisplayName, $addr) -ForegroundColor Green
     } catch {
         $msg = $_.Exception.Message
-
-        if ($msg -match "is already a member" -or $msg -match "already.*member") {
-            $skipped++
-            Write-Host ("Skipped (already member): {0} <{1}>" -f $u.DisplayName, $addr) -ForegroundColor DarkYellow
-        } else {
-            $failed++
-            Write-Warning ("Failed to add {0} <{1}>: {2}" -f $u.DisplayName, $addr, $msg)
-        }
+        $failed++
+        Write-Warning ("Failed to add {0} <{1}>: {2}" -f $u.DisplayName, $addr, $msg)
     }
 }
 
 Write-Host ""
 Write-Host "Done." -ForegroundColor Green
-Write-Host ("Added:   {0}" -f $added)
-Write-Host ("Skipped: {0}" -f $skipped)
-Write-Host ("Failed:  {0}" -f $failed)
+Write-Host ("Added:            {0}" -f $added)
+Write-Host ("Already members:  {0}" -f $toSkip.Count)
+Write-Host ("Failed:           {0}" -f $failed)
+Write-Host ("No Mail (used UPN): {0}" -f $noMail.Count)
