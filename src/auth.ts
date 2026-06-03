@@ -35,6 +35,32 @@ export const { handlers, auth, signIn, signOut } = NextAuth({
         });
       }
     },
+    // [m365-auth-debug] Logs exactly what Entra returned when the account is
+    // first linked. The critical signal is whether a refresh_token is present:
+    // if false, Entra did not issue one (usually offline_access wasn't granted
+    // or admin consent is missing). Note: PrismaAdapter only links on first
+    // sign-in, so an existing user re-signing in does NOT trigger this.
+    async linkAccount({ user, account }) {
+      console.log("[m365-auth-debug] linkAccount", {
+        userEmail: user.email,
+        provider: account.provider,
+        scope: account.scope,
+        token_type: account.token_type,
+        expires_at: account.expires_at,
+        has_access_token: !!account.access_token,
+        has_refresh_token: !!account.refresh_token,
+        has_id_token: !!account.id_token,
+      });
+    },
+    async signIn({ user, account, isNewUser }) {
+      console.log("[m365-auth-debug] signIn", {
+        userEmail: user.email,
+        provider: account?.provider,
+        scope: account?.scope,
+        has_refresh_token: !!account?.refresh_token,
+        isNewUser,
+      });
+    },
   },
   callbacks: {
     ...authConfig.callbacks,

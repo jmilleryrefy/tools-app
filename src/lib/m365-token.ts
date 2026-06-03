@@ -113,13 +113,29 @@ async function redeemRefreshToken(
     error_description?: string;
   };
 
+  // [m365-auth-debug] Log the redemption outcome. On success we log only
+  // non-sensitive metadata (never the tokens themselves); on failure we log
+  // the Entra error code/description, which usually pinpoints the cause
+  // (e.g. AADSTS65001 = no consent, AADSTS700082 = expired refresh token).
   if (!res.ok || !data.access_token) {
+    console.error("[m365-auth-debug] token redemption FAILED", {
+      requested_scope: scope,
+      http_status: res.status,
+      error: data.error,
+      error_description: data.error_description,
+    });
     const detail = data.error_description || data.error || `HTTP ${res.status}`;
-    // AADSTS65001 = no consent; AADSTS70000/700082 = expired/invalid refresh token.
     throw new M365TokenError(
       `Failed to obtain Microsoft 365 token for scope "${scope}": ${detail}`
     );
   }
+
+  console.log("[m365-auth-debug] token redemption OK", {
+    requested_scope: scope,
+    granted_scope: data.scope,
+    expires_in: data.expires_in,
+    rotated_refresh_token: !!data.refresh_token,
+  });
 
   return data;
 }
@@ -147,8 +163,25 @@ export async function getM365TokensForUser(
     select: {
       id: true,
       refresh_token: true,
+      access_token: true,
+      scope: true,
+      expires_at: true,
       user: { select: { email: true } },
     },
+  });
+
+  // [m365-auth-debug] Surface the stored account state so we can tell whether
+  // the row exists, whether a refresh token was persisted, and which scopes
+  // were granted at sign-in.
+  console.log("[m365-auth-debug] getM365TokensForUser", {
+    userId,
+    needs,
+    account_found: !!account,
+    userEmail: account?.user?.email,
+    scope: account?.scope,
+    expires_at: account?.expires_at,
+    has_access_token: !!account?.access_token,
+    has_refresh_token: !!account?.refresh_token,
   });
 
   if (!account) {
