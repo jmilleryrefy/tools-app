@@ -23,6 +23,27 @@ export const authConfig: NextAuthConfig = {
       clientId: process.env.AUTH_MICROSOFT_ENTRA_ID_ID!,
       clientSecret: process.env.AUTH_MICROSOFT_ENTRA_ID_SECRET!,
       issuer: `https://login.microsoftonline.com/${process.env.AUTH_MICROSOFT_ENTRA_ID_TENANT_ID}/v2.0`,
+      // Request `offline_access` so Entra issues a refresh token (stored by the
+      // PrismaAdapter on the Account row). That refresh token is later redeemed
+      // server-side for resource-specific Graph/Exchange Online access tokens so
+      // executed PowerShell runs AS the signed-in user instead of prompting a
+      // separate device-code login. See src/lib/m365-token.ts.
+      //
+      // Refresh tokens in Entra v2 are multi-resource, so requesting Graph
+      // scopes here is sufficient to later mint both Graph and EXO tokens,
+      // PROVIDED the Office 365 Exchange Online delegated permission is granted
+      // (with admin consent) on the app registration.
+      authorization: {
+        params: {
+          scope: [
+            "openid",
+            "profile",
+            "email",
+            "offline_access",
+            "https://graph.microsoft.com/.default",
+          ].join(" "),
+        },
+      },
     }),
   ],
   // Use unprefixed cookie names to avoid browser rejection on non-standard TLD domains

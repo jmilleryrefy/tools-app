@@ -77,7 +77,7 @@ param(
 
 ${moduleCheck(["Microsoft.Graph.Authentication", "Microsoft.Graph.Users", "Microsoft.Graph.Identity.DirectoryManagement", "Microsoft.Graph.Groups"])}
 
-Connect-MgGraph -Scopes "User.ReadWrite.All", "Directory.ReadWrite.All", "Organization.Read.All", "Group.ReadWrite.All" -UseDeviceCode -NoWelcome
+Connect-MgGraph -AccessToken (ConvertTo-SecureString $env:GRAPH_TOKEN -AsPlainText -Force) -NoWelcome
 
 # ── Configuration ────────────────────────────────────────────────────────────
 
@@ -1417,7 +1417,7 @@ param(
 
 ${moduleCheck(["Microsoft.Graph.Authentication", "Microsoft.Graph.Users"])}
 
-Connect-MgGraph -Scopes "User.Read.All" -UseDeviceCode -NoWelcome
+Connect-MgGraph -AccessToken (ConvertTo-SecureString $env:GRAPH_TOKEN -AsPlainText -Force) -NoWelcome
 
 try {
     $users = Get-MgUser -All -Property DisplayName, UserPrincipalName, AssignedLicenses -Filter "assignedLicenses/\\$count ne 0" -ConsistencyLevel eventual -CountVariable count
@@ -1460,7 +1460,7 @@ param(
 
 ${moduleCheck(["Microsoft.Graph.Authentication", "Microsoft.Graph.Users"])}
 
-Connect-MgGraph -Scopes "User.Read.All" -UseDeviceCode -NoWelcome
+Connect-MgGraph -AccessToken (ConvertTo-SecureString $env:GRAPH_TOKEN -AsPlainText -Force) -NoWelcome
 
 try {
     $users = Get-MgUser -All -Property DisplayName, UserPrincipalName, AssignedLicenses -Filter "assignedLicenses/\\$count ne 0" -ConsistencyLevel eventual -CountVariable count
@@ -1523,7 +1523,7 @@ param(
 
 ${moduleCheck(["Microsoft.Graph.Authentication", "Microsoft.Graph.Users"])}
 
-Connect-MgGraph -Scopes "UserAuthenticationMethod.ReadWrite.All" -UseDeviceCode -NoWelcome
+Connect-MgGraph -AccessToken (ConvertTo-SecureString $env:GRAPH_TOKEN -AsPlainText -Force) -NoWelcome
 
 try {
     $users = Import-Csv -Path $CsvPath
@@ -1568,7 +1568,7 @@ param(
 
 ${moduleCheck(["Microsoft.Graph.Authentication", "Microsoft.Graph.Users"])}
 
-Connect-MgGraph -Scopes "UserAuthenticationMethod.ReadWrite.All" -UseDeviceCode -NoWelcome
+Connect-MgGraph -AccessToken (ConvertTo-SecureString $env:GRAPH_TOKEN -AsPlainText -Force) -NoWelcome
 
 try {
     $users = Import-Csv -Path $CsvPath
@@ -1613,7 +1613,7 @@ param(
 
 ${moduleCheck(["Microsoft.Graph.Authentication", "Microsoft.Graph.Users"])}
 
-Connect-MgGraph -Scopes "User.ReadWrite.All", "AuditLog.Read.All" -UseDeviceCode -NoWelcome
+Connect-MgGraph -AccessToken (ConvertTo-SecureString $env:GRAPH_TOKEN -AsPlainText -Force) -NoWelcome
 
 try {
     $cutoffDate = (Get-Date).AddDays(-$InactiveDays).ToString("yyyy-MM-ddTHH:mm:ssZ")
@@ -1667,7 +1667,7 @@ param(
 
 ${moduleCheck(["Microsoft.Graph.Authentication", "Microsoft.Graph.Users"])}
 
-Connect-MgGraph -Scopes "User.ReadWrite.All", "AuditLog.Read.All" -UseDeviceCode -NoWelcome
+Connect-MgGraph -AccessToken (ConvertTo-SecureString $env:GRAPH_TOKEN -AsPlainText -Force) -NoWelcome
 
 try {
     $cutoffDate = (Get-Date).AddDays(-$InactiveDays).ToString("yyyy-MM-ddTHH:mm:ssZ")
@@ -1718,7 +1718,7 @@ finally {
 
 ${moduleCheck(["ExchangeOnlineManagement"])}
 
-Connect-ExchangeOnline -Device
+Connect-ExchangeOnline -AccessToken $env:EXO_TOKEN -UserPrincipalName $env:M365_UPN -ShowBanner:$false
 
 try {
     $mailboxes = Get-EXOMailbox -ResultSize Unlimited -Properties DisplayName, UserPrincipalName
@@ -1756,7 +1756,7 @@ finally {
 
 ${moduleCheck(["ExchangeOnlineManagement"])}
 
-Connect-ExchangeOnline -Device
+Connect-ExchangeOnline -AccessToken $env:EXO_TOKEN -UserPrincipalName $env:M365_UPN -ShowBanner:$false
 
 try {
     $mailboxes = Get-EXOMailbox -ResultSize Unlimited -Properties DisplayName, UserPrincipalName
@@ -1808,7 +1808,7 @@ param(
 
 ${moduleCheck(["ExchangeOnlineManagement"])}
 
-Connect-ExchangeOnline -Device
+Connect-ExchangeOnline -AccessToken $env:EXO_TOKEN -UserPrincipalName $env:M365_UPN -ShowBanner:$false
 
 try {
     $params = @{
@@ -1856,7 +1856,7 @@ param(
 
 ${moduleCheck(["ExchangeOnlineManagement"])}
 
-Connect-ExchangeOnline -Device
+Connect-ExchangeOnline -AccessToken $env:EXO_TOKEN -UserPrincipalName $env:M365_UPN -ShowBanner:$false
 
 try {
     $params = @{
@@ -1900,14 +1900,17 @@ finally {
 
 param(
     [string]$Department = "Sales",
-    [string]$DistributionList = "studentloanadvocates@yrefy.com"
+    [string]$DistributionList = "studentloanadvocates@yrefy.com",
+    # Safe-by-default: blank performs a dry run (preview only). Set to "YES" to
+    # actually add members.
+    [string]$Confirm = ""
 )
 
 ${moduleCheck(["Microsoft.Graph.Authentication", "Microsoft.Graph.Users", "ExchangeOnlineManagement"])}
 
 # ── Connect to services ──────────────────────────────────────────────────────
-Connect-MgGraph -Scopes "User.Read.All" -UseDeviceCode -NoWelcome
-Connect-ExchangeOnline -Device
+Connect-MgGraph -AccessToken (ConvertTo-SecureString $env:GRAPH_TOKEN -AsPlainText -Force) -NoWelcome
+Connect-ExchangeOnline -AccessToken $env:EXO_TOKEN -UserPrincipalName $env:M365_UPN -ShowBanner:$false
 
 try {
     # ── Validate the distribution list ────────────────────────────────────────
@@ -1938,6 +1941,12 @@ try {
 
     Write-Host ("Users found: {0}" -f @($users).Count) -ForegroundColor Green
     $users | Select-Object displayName, userPrincipalName, mail, department | Format-Table -AutoSize
+
+    # ── Safety gate: dry run unless Confirm = YES ─────────────────────────────
+    if ($Confirm -ne "YES") {
+        Write-Host ("Dry run (Confirm != 'YES'): would add the above users to DL '{0}'. No changes made." -f $dl.PrimarySmtpAddress) -ForegroundColor Yellow
+        return
+    }
 
     # ── Pre-load existing DL members (bulk) ──────────────────────────────────
     Write-Host "Loading current DL members (bulk fetch)..." -ForegroundColor Cyan
@@ -2022,14 +2031,17 @@ finally {
 
 param(
     [string]$Department = "Sales",
-    [string]$DistributionList = "studentloanadvocates@yrefy.com"
+    [string]$DistributionList = "studentloanadvocates@yrefy.com",
+    # Safe-by-default: blank performs a dry run (preview only). Set to "YES" to
+    # actually add members.
+    [string]$Confirm = ""
 )
 
 ${moduleCheck(["Microsoft.Graph.Authentication", "Microsoft.Graph.Users", "ExchangeOnlineManagement"])}
 
 # ── Connect to services ──────────────────────────────────────────────────────
-Connect-MgGraph -Scopes "User.Read.All" -UseDeviceCode -NoWelcome
-Connect-ExchangeOnline -Device
+Connect-MgGraph -AccessToken (ConvertTo-SecureString $env:GRAPH_TOKEN -AsPlainText -Force) -NoWelcome
+Connect-ExchangeOnline -AccessToken $env:EXO_TOKEN -UserPrincipalName $env:M365_UPN -ShowBanner:$false
 
 try {
     # ── Validate the distribution list ────────────────────────────────────────
@@ -2060,6 +2072,12 @@ try {
 
     Write-Host ("Users found: {0}" -f @($users).Count) -ForegroundColor Green
     $users | Select-Object displayName, userPrincipalName, mail, department | Format-Table -AutoSize
+
+    # ── Safety gate: dry run unless Confirm = YES ─────────────────────────────
+    if ($Confirm -ne "YES") {
+        Write-Host ("Dry run (Confirm != 'YES'): would add the above users to DL '{0}'. No changes made." -f $dl.PrimarySmtpAddress) -ForegroundColor Yellow
+        return
+    }
 
     # ── Pre-load existing DL members (bulk) ──────────────────────────────────
     Write-Host "Loading current DL members (bulk fetch)..." -ForegroundColor Cyan
@@ -2150,6 +2168,17 @@ finally {
       description:
         "The distribution list to add users to (display name or email address)",
       sortOrder: 2,
+    },
+    {
+      id: "param-add-dept-dl-confirm",
+      name: "Confirm",
+      label: "Confirm changes",
+      type: "STRING" as const,
+      required: false,
+      defaultValue: "",
+      description:
+        "Leave blank to perform a dry run that only previews the matched users without modifying the distribution list. Type YES to actually add members.",
+      sortOrder: 3,
     },
   ];
 
@@ -2264,7 +2293,7 @@ finally {
 
 ${moduleCheck(["Microsoft.Graph.Authentication", "Microsoft.Graph.Groups", "Microsoft.Graph.Users"])}
 
-Connect-MgGraph -Scopes "Group.Read.All" -UseDeviceCode -NoWelcome
+Connect-MgGraph -AccessToken (ConvertTo-SecureString $env:GRAPH_TOKEN -AsPlainText -Force) -NoWelcome
 
 try {
     $teams = Get-MgGroup -Filter "resourceProvisioningOptions/Any(x:x eq 'Team')" -All -Property DisplayName, Id, Description, CreatedDateTime
@@ -2306,7 +2335,7 @@ finally {
 
 ${moduleCheck(["Microsoft.Graph.Authentication", "Microsoft.Graph.Groups", "Microsoft.Graph.Users"])}
 
-Connect-MgGraph -Scopes "Group.Read.All" -UseDeviceCode -NoWelcome
+Connect-MgGraph -AccessToken (ConvertTo-SecureString $env:GRAPH_TOKEN -AsPlainText -Force) -NoWelcome
 
 try {
     $teams = Get-MgGroup -Filter "resourceProvisioningOptions/Any(x:x eq 'Team')" -All -Property DisplayName, Id, Description, CreatedDateTime
@@ -2352,7 +2381,7 @@ finally {
 
 ${moduleCheck(["Microsoft.Graph.Authentication", "Microsoft.Graph.Identity.DirectoryManagement", "Microsoft.Graph.Users"])}
 
-Connect-MgGraph -Scopes "RoleManagement.Read.Directory" -UseDeviceCode -NoWelcome
+Connect-MgGraph -AccessToken (ConvertTo-SecureString $env:GRAPH_TOKEN -AsPlainText -Force) -NoWelcome
 
 try {
     $roles = Get-MgDirectoryRole -All
@@ -2394,7 +2423,7 @@ finally {
 
 ${moduleCheck(["Microsoft.Graph.Authentication", "Microsoft.Graph.Identity.DirectoryManagement", "Microsoft.Graph.Users"])}
 
-Connect-MgGraph -Scopes "RoleManagement.Read.Directory" -UseDeviceCode -NoWelcome
+Connect-MgGraph -AccessToken (ConvertTo-SecureString $env:GRAPH_TOKEN -AsPlainText -Force) -NoWelcome
 
 try {
     $roles = Get-MgDirectoryRole -All
@@ -2436,7 +2465,7 @@ finally {
 
 ${moduleCheck(["Microsoft.Graph.Authentication", "Microsoft.Graph.Users", "Microsoft.Graph.Identity.SignIns"])}
 
-Connect-MgGraph -Scopes "UserAuthenticationMethod.Read.All", "User.Read.All" -UseDeviceCode -NoWelcome
+Connect-MgGraph -AccessToken (ConvertTo-SecureString $env:GRAPH_TOKEN -AsPlainText -Force) -NoWelcome
 
 try {
     $users = Get-MgUser -All -Property DisplayName, UserPrincipalName, AccountEnabled -Filter "accountEnabled eq true"
@@ -2484,7 +2513,7 @@ finally {
 
 ${moduleCheck(["Microsoft.Graph.Authentication", "Microsoft.Graph.Users", "Microsoft.Graph.Identity.SignIns"])}
 
-Connect-MgGraph -Scopes "UserAuthenticationMethod.Read.All", "User.Read.All" -UseDeviceCode -NoWelcome
+Connect-MgGraph -AccessToken (ConvertTo-SecureString $env:GRAPH_TOKEN -AsPlainText -Force) -NoWelcome
 
 try {
     $users = Get-MgUser -All -Property DisplayName, UserPrincipalName, AccountEnabled -Filter "accountEnabled eq true"
@@ -2535,7 +2564,7 @@ finally {
 
 ${moduleCheck(["Microsoft.Graph.Authentication", "Microsoft.Graph.Identity.DirectoryManagement"])}
 
-Connect-MgGraph -Scopes "Organization.Read.All" -UseDeviceCode -NoWelcome
+Connect-MgGraph -AccessToken (ConvertTo-SecureString $env:GRAPH_TOKEN -AsPlainText -Force) -NoWelcome
 
 try {
     $subscriptions = Get-MgSubscribedSku -All
@@ -2577,7 +2606,7 @@ finally {
 
 ${moduleCheck(["Microsoft.Graph.Authentication", "Microsoft.Graph.Identity.DirectoryManagement"])}
 
-Connect-MgGraph -Scopes "Organization.Read.All" -UseDeviceCode -NoWelcome
+Connect-MgGraph -AccessToken (ConvertTo-SecureString $env:GRAPH_TOKEN -AsPlainText -Force) -NoWelcome
 
 try {
     $subscriptions = Get-MgSubscribedSku -All

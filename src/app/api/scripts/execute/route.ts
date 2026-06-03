@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { auth } from "@/auth";
 import { prisma } from "@/lib/prisma";
+import { getM365TokensForUser, detectM365Needs, M365TokenError } from "@/lib/m365-token";
 import { spawn } from "child_process";
 import { writeFile, unlink } from "fs/promises";
 import { join } from "path";
@@ -125,6 +126,27 @@ export async function POST(req: NextRequest) {
     );
   }
 
+  // Acquire the signed-in user's Microsoft 365 delegated access tokens so the
+  // script connects to Graph / Exchange Online AS this user (no device code).
+  // Only mint tokens for the services the script actually connects to, so a
+  // Graph-only script isn't blocked by missing Exchange Online consent (and we
+  // skip the redemption entirely for scripts that need neither).
+  // Done before creating the execution record so a token failure doesn't leave
+  // a dangling RUNNING row.
+  const needs = detectM365Needs(script.content);
+  let m365Tokens = null;
+  if (needs.graph || needs.exo) {
+    try {
+      m365Tokens = await getM365TokensForUser(session.user.id, needs);
+    } catch (err) {
+      const message =
+        err instanceof M365TokenError
+          ? err.message
+          : "Failed to obtain Microsoft 365 access for your account.";
+      return NextResponse.json({ error: message }, { status: 403 });
+    }
+  }
+
   // Create execution record
   const execution = await prisma.scriptExecution.create({
     data: {
@@ -185,9 +207,24 @@ export async function POST(req: NextRequest) {
 
       send("execution_id", executionId);
 
+      // Delegated M365 tokens for the signed-in user. Passed via env (never
+      // written to disk or argv) so scripts can connect without a device code:
+      // Connect-MgGraph -AccessToken (...) / Connect-ExchangeOnline -AccessToken ...
+      // Only the tokens the script needs are present (see detectM365Needs).
+      const env: NodeJS.ProcessEnv = {
+        ...process.env,
+        TERM: "dumb",
+        NO_COLOR: "1",
+      };
+      if (m365Tokens) {
+        if (m365Tokens.graphToken) env.GRAPH_TOKEN = m365Tokens.graphToken;
+        if (m365Tokens.exoToken) env.EXO_TOKEN = m365Tokens.exoToken;
+        env.M365_UPN = m365Tokens.upn;
+      }
+
       const ps = spawn("pwsh", ["-NoProfile", "-NonInteractive", "-File", scriptPath], {
         stdio: ["ignore", "pipe", "pipe"],
-        env: { ...process.env, TERM: "dumb", NO_COLOR: "1" },
+        env,
       });
 
       let stdoutDone = false;
