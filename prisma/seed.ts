@@ -2010,7 +2010,7 @@ try {
 }
 finally {
     Disconnect-MgGraph
-    Disconnect-ExchangeOnline -Confirm:\\$false
+    Disconnect-ExchangeOnline -Confirm:$false
 }`,
     },
     create: {
@@ -2141,7 +2141,7 @@ try {
 }
 finally {
     Disconnect-MgGraph
-    Disconnect-ExchangeOnline -Confirm:\\$false
+    Disconnect-ExchangeOnline -Confirm:$false
 }`,
     },
   });
@@ -2189,6 +2189,268 @@ finally {
       create: {
         ...param,
         scriptId: addDeptToDLScript.id,
+      },
+    });
+  }
+
+  // --- Exchange Online: Remove Inactive Members from Distribution List ---
+
+  const REMOVE_INACTIVE_DL_SCRIPT = `# Remove Inactive Employees from Distribution List
+# Requires: Microsoft.Graph, ExchangeOnlineManagement modules
+# Permissions: User.Read.All, AuditLog.Read.All (Graph), Exchange Administrator (EXO)
+#
+# Removes distribution list members who have had no Entra ID sign-in activity
+# (interactive or non-interactive) within the lookback window. Disabled
+# accounts and users who have never signed in are also treated as inactive.
+# Defaults to teamyrefy@yrefy.com; set AllDistributionLists to "YES" to run
+# against every distribution list in the tenant.
+#
+# Only user mailbox members are evaluated - nested groups, shared mailboxes,
+# and mail contacts are left untouched.
+
+param(
+    [string]$DistributionList = "teamyrefy@yrefy.com",
+
+    # Set to "YES" to process every distribution list in the tenant
+    # (DistributionList is ignored when this is set).
+    [string]$AllDistributionLists = "",
+
+    # Members with no activity in this many days are considered inactive.
+    [string]$InactiveDays = "30",
+
+    # Safe-by-default: blank performs a dry run (preview only). Set to "YES" to
+    # actually remove members.
+    [string]$Confirm = ""
+)
+
+${moduleCheck(["Microsoft.Graph.Authentication", "Microsoft.Graph.Users", "ExchangeOnlineManagement"])}
+
+# ── Connect to services ──────────────────────────────────────────────────────
+Connect-MgGraph -AccessToken (ConvertTo-SecureString $env:GRAPH_TOKEN -AsPlainText -Force) -NoWelcome
+Connect-ExchangeOnline -AccessToken $env:EXO_TOKEN -UserPrincipalName $env:M365_UPN -ShowBanner:$false
+
+try {
+    # ── Validate parameters ───────────────────────────────────────────────────
+    $days = 0
+    if (-not [int]::TryParse("$InactiveDays", [ref]$days) -or $days -lt 1) {
+        Write-Error "InactiveDays must be a positive integer (got '$InactiveDays')."
+        exit 1
+    }
+    $cutoff = (Get-Date).ToUniversalTime().AddDays(-$days)
+    Write-Host ("Inactivity cutoff: {0:yyyy-MM-dd HH:mm} UTC ({1} days)" -f $cutoff, $days) -ForegroundColor Cyan
+
+    # ── Resolve target distribution list(s) ───────────────────────────────────
+    if ($AllDistributionLists -eq "YES") {
+        Write-Host "Loading ALL distribution lists in the tenant..." -ForegroundColor Cyan
+        $dls = @(Get-DistributionGroup -ResultSize Unlimited -ErrorAction Stop)
+    } else {
+        Write-Host "Validating DL '$DistributionList' exists in Exchange Online..." -ForegroundColor Cyan
+        $dls = @(Get-DistributionGroup -Identity $DistributionList -ErrorAction Stop)
+    }
+
+    if ($dls.Count -eq 0) {
+        Write-Warning "No distribution lists found. Nothing to do."
+        return
+    }
+    Write-Host ("Distribution lists to process: {0}" -f $dls.Count) -ForegroundColor Green
+
+    # ── Build sign-in activity lookup from Graph ──────────────────────────────
+    Write-Host "Fetching sign-in activity for all users from Graph (this can take a minute)..." -ForegroundColor Cyan
+    $graphUsers = Get-MgUser -All \`
+        -Property "id,displayName,userPrincipalName,mail,accountEnabled,signInActivity" \`
+        -ErrorAction Stop
+
+    $usersById   = @{}
+    $usersByMail = @{}
+    foreach ($gu in $graphUsers) {
+        $last = $null
+        if ($gu.SignInActivity) {
+            $candidates = @(
+                $gu.SignInActivity.LastSignInDateTime
+                $gu.SignInActivity.LastNonInteractiveSignInDateTime
+            ) | Where-Object { $_ }
+            if ($candidates) { $last = ($candidates | Sort-Object -Descending)[0] }
+        }
+        $entry = [PSCustomObject]@{ User = $gu; LastActivity = $last }
+        $usersById[$gu.Id] = $entry
+        if ($gu.Mail)              { $usersByMail[$gu.Mail.ToLowerInvariant()] = $entry }
+        if ($gu.UserPrincipalName) { $usersByMail[$gu.UserPrincipalName.ToLowerInvariant()] = $entry }
+    }
+    Write-Host ("Graph users indexed: {0}" -f $usersById.Count) -ForegroundColor Green
+
+    if ($Confirm -ne "YES") {
+        Write-Host ""
+        Write-Host "Dry run (Confirm != 'YES'): no members will be removed." -ForegroundColor Yellow
+    }
+
+    $totalRemoved = 0
+    $totalFailed  = 0
+    $totalFlagged = 0
+
+    foreach ($dl in $dls) {
+        Write-Host ""
+        Write-Host ("── {0} <{1}>" -f $dl.DisplayName, $dl.PrimarySmtpAddress) -ForegroundColor Cyan
+
+        try {
+            $members = @(Get-DistributionGroupMember -Identity $dl.Identity -ResultSize Unlimited -ErrorAction Stop)
+        } catch {
+            Write-Warning ("Failed to read members of '{0}': {1}" -f $dl.PrimarySmtpAddress, $_.Exception.Message)
+            continue
+        }
+
+        $userMembers = @($members | Where-Object { $_.RecipientTypeDetails -eq "UserMailbox" })
+        Write-Host ("Members: {0} total, {1} user mailbox(es) evaluated" -f $members.Count, $userMembers.Count)
+
+        $inactive = [System.Collections.Generic.List[object]]::new()
+        foreach ($m in $userMembers) {
+            $entry = $null
+            if ($m.ExternalDirectoryObjectId -and $usersById.ContainsKey($m.ExternalDirectoryObjectId)) {
+                $entry = $usersById[$m.ExternalDirectoryObjectId]
+            } elseif ($m.PrimarySmtpAddress -and $usersByMail.ContainsKey($m.PrimarySmtpAddress.ToString().ToLowerInvariant())) {
+                $entry = $usersByMail[$m.PrimarySmtpAddress.ToString().ToLowerInvariant()]
+            }
+
+            if (-not $entry) {
+                Write-Warning ("  No Graph user match for '{0}' - skipping." -f $m.PrimarySmtpAddress)
+                continue
+            }
+
+            $reason = $null
+            if ($entry.User.AccountEnabled -eq $false) {
+                $reason = "account disabled"
+            } elseif (-not $entry.LastActivity) {
+                $reason = "never signed in"
+            } elseif ($entry.LastActivity -lt $cutoff) {
+                $reason = "no activity since " + $entry.LastActivity.ToString("yyyy-MM-dd")
+            }
+
+            if ($reason) {
+                $inactive.Add([PSCustomObject]@{
+                    DisplayName  = $entry.User.DisplayName
+                    Address      = $m.PrimarySmtpAddress.ToString()
+                    LastActivity = if ($entry.LastActivity) { $entry.LastActivity.ToString("yyyy-MM-dd HH:mm") } else { "(never)" }
+                    Reason       = $reason
+                })
+            }
+        }
+
+        if ($inactive.Count -eq 0) {
+            Write-Host "  No inactive members found." -ForegroundColor Green
+            continue
+        }
+
+        $totalFlagged += $inactive.Count
+        $inactive | Format-Table DisplayName, Address, LastActivity, Reason -AutoSize
+
+        if ($Confirm -ne "YES") {
+            Write-Host ("  [Dry run] Would remove {0} member(s) from '{1}'." -f $inactive.Count, $dl.PrimarySmtpAddress) -ForegroundColor Yellow
+            continue
+        }
+
+        foreach ($i in $inactive) {
+            try {
+                Remove-DistributionGroupMember -Identity $dl.Identity -Member $i.Address -Confirm:$false -ErrorAction Stop
+                $totalRemoved++
+                Write-Host ("  Removed: {0} <{1}>" -f $i.DisplayName, $i.Address) -ForegroundColor Green
+            } catch {
+                $totalFailed++
+                Write-Warning ("  Failed to remove {0} <{1}>: {2}" -f $i.DisplayName, $i.Address, $_.Exception.Message)
+            }
+        }
+    }
+
+    # ── Summary ───────────────────────────────────────────────────────────────
+    Write-Host ""
+    Write-Host "Done." -ForegroundColor Green
+    Write-Host ("Lists processed:  {0}" -f $dls.Count)
+    Write-Host ("Inactive flagged: {0}" -f $totalFlagged)
+    if ($Confirm -eq "YES") {
+        Write-Host ("Removed:          {0}" -f $totalRemoved)
+        Write-Host ("Failed:           {0}" -f $totalFailed)
+    } else {
+        Write-Host "Mode:             DRY RUN (set Confirm = YES to remove)" -ForegroundColor Yellow
+    }
+}
+finally {
+    Disconnect-MgGraph
+    Disconnect-ExchangeOnline -Confirm:$false
+}`;
+
+  const removeInactiveDLScript = await prisma.script.upsert({
+    where: { slug: "remove-inactive-from-distribution-list" },
+    update: {
+      description:
+        "Removes members with no Entra ID sign-in activity within the lookback window (default 30 days) from a distribution list. Defaults to teamyrefy@yrefy.com, or can run against every distribution list in the tenant. Dry run by default.",
+      tags: "exchange,distribution-list,inactive,cleanup,graph",
+      requiresAdmin: true,
+      content: REMOVE_INACTIVE_DL_SCRIPT,
+    },
+    create: {
+      name: "Remove Inactive Members from Distribution List",
+      slug: "remove-inactive-from-distribution-list",
+      description:
+        "Removes members with no Entra ID sign-in activity within the lookback window (default 30 days) from a distribution list. Defaults to teamyrefy@yrefy.com, or can run against every distribution list in the tenant. Dry run by default.",
+      categoryId: mailbox.id,
+      tags: "exchange,distribution-list,inactive,cleanup,graph",
+      requiresAdmin: true,
+      content: REMOVE_INACTIVE_DL_SCRIPT,
+    },
+  });
+
+  const removeInactiveDLParams = [
+    {
+      id: "param-remove-inactive-dl-distrolist",
+      name: "DistributionList",
+      label: "Distribution List",
+      type: "STRING" as const,
+      required: false,
+      defaultValue: "teamyrefy@yrefy.com",
+      description:
+        "The distribution list to clean up (display name or email address). Ignored when 'All distribution lists' is set to YES.",
+      sortOrder: 1,
+    },
+    {
+      id: "param-remove-inactive-dl-all",
+      name: "AllDistributionLists",
+      label: "All distribution lists",
+      type: "STRING" as const,
+      required: false,
+      defaultValue: "",
+      description:
+        "Type YES to process every distribution list in the tenant instead of the single list above.",
+      sortOrder: 2,
+    },
+    {
+      id: "param-remove-inactive-dl-days",
+      name: "InactiveDays",
+      label: "Inactive days",
+      type: "NUMBER" as const,
+      required: false,
+      defaultValue: "30",
+      description:
+        "Members with no sign-in activity in this many days are considered inactive (disabled and never-signed-in accounts are always flagged).",
+      sortOrder: 3,
+    },
+    {
+      id: "param-remove-inactive-dl-confirm",
+      name: "Confirm",
+      label: "Confirm changes",
+      type: "STRING" as const,
+      required: false,
+      defaultValue: "",
+      description:
+        "Leave blank to perform a dry run that only previews the inactive members without modifying anything. Type YES to actually remove them.",
+      sortOrder: 4,
+    },
+  ];
+
+  for (const param of removeInactiveDLParams) {
+    await prisma.scriptParameter.upsert({
+      where: { id: param.id },
+      update: {},
+      create: {
+        ...param,
+        scriptId: removeInactiveDLScript.id,
       },
     });
   }
@@ -2638,6 +2900,542 @@ finally {
     },
   });
 
+  // --- Offboarding: Deprovision User ---
+
+  const OFFBOARD_USER_SCRIPT = `# Offboard / Deprovision User
+# Requires: Microsoft.Graph, ExchangeOnlineManagement modules
+# Permissions: User.ReadWrite.All, Directory.ReadWrite.All, Group.ReadWrite.All (Graph),
+#              Exchange Administrator (EXO)
+#
+# Performs standard offboarding steps for a departing employee:
+#   1. Block sign-in (disable account)
+#   2. Revoke all active sessions / refresh tokens
+#   3. Reset password to a random value
+#   4. Remove from all Entra ID security/M365 groups (owner refs are left intact)
+#   5. Convert the mailbox to a shared mailbox (preserves mail; done BEFORE
+#      license removal per Microsoft guidance)
+#   6. Remove all assigned licenses
+#   7. Optionally set an auto-reply and forward mail to the manager
+#
+# SAFE BY DEFAULT: with Confirm != "YES" this performs a DRY RUN that only
+# reports what WOULD happen. Set Confirm to YES to execute the changes.
+
+param(
+    [Parameter(Mandatory=$true)]
+    [string]$UserPrincipalName,
+
+    # When set (UPN or display name), mail is forwarded to this manager and an
+    # auto-reply is configured. Leave blank to skip forwarding/auto-reply.
+    [string]$ForwardTo = "",
+
+    [string]$AutoReplyMessage = "",
+
+    # Skip converting the mailbox to shared (e.g. for a guest / unlicensed user).
+    # String on purpose: the runner passes booleans as "true"/"false" strings.
+    [string]$SkipMailboxConversion = "false",
+
+    # Safe-by-default: blank performs a dry run (preview only). Set to "YES" to
+    # actually execute the offboarding actions.
+    [string]$Confirm = ""
+)
+
+${moduleCheck(["Microsoft.Graph.Authentication", "Microsoft.Graph.Users", "Microsoft.Graph.Users.Actions", "Microsoft.Graph.Groups", "ExchangeOnlineManagement"])}
+
+Connect-MgGraph -AccessToken (ConvertTo-SecureString $env:GRAPH_TOKEN -AsPlainText -Force) -NoWelcome
+Connect-ExchangeOnline -AccessToken $env:EXO_TOKEN -UserPrincipalName $env:M365_UPN -ShowBanner:$false
+
+$dryRun = ($Confirm -ne "YES")
+function Step([string]$msg) { Write-Host ("  -> " + $msg) -ForegroundColor $(if ($dryRun) { "Cyan" } else { "Green" }) }
+
+try {
+    # ── Resolve target user ──────────────────────────────────────────────────
+    $user = Get-MgUser -UserId $UserPrincipalName -Property "id,displayName,userPrincipalName,accountEnabled,assignedLicenses" -ErrorAction Stop
+    Write-Host ("Offboarding target: {0} <{1}>" -f $user.DisplayName, $user.UserPrincipalName) -ForegroundColor White
+    if ($dryRun) {
+        Write-Host "DRY RUN (Confirm != 'YES') - no changes will be made." -ForegroundColor Yellow
+    } else {
+        Write-Host "LIVE RUN - changes WILL be applied." -ForegroundColor Red
+    }
+    Write-Host ""
+
+    # ── 1. Block sign-in ──────────────────────────────────────────────────────
+    Write-Host "1. Block sign-in" -ForegroundColor White
+    if ($dryRun) { Step "Would disable account (currently Enabled=$($user.AccountEnabled))" }
+    else { Update-MgUser -UserId $user.Id -AccountEnabled:$false; Step "Account disabled" }
+
+    # ── 2. Revoke sessions ─────────────────────────────────────────────────────
+    Write-Host "2. Revoke active sessions" -ForegroundColor White
+    if ($dryRun) { Step "Would revoke all refresh tokens / sessions" }
+    else { Revoke-MgUserSignInSession -UserId $user.Id | Out-Null; Step "Sessions revoked" }
+
+    # ── 3. Reset password ──────────────────────────────────────────────────────
+    Write-Host "3. Reset password" -ForegroundColor White
+    if ($dryRun) { Step "Would reset password to a random value" }
+    else {
+        $randomPw = -join ((65..90) + (97..122) + (48..57) + (33,35,36,37,42) | Get-Random -Count 20 | ForEach-Object { [char]$_ })
+        Update-MgUser -UserId $user.Id -PasswordProfile @{ Password = $randomPw; ForceChangePasswordNextSignIn = $true }
+        Step "Password reset"
+    }
+
+    # ── 4. Remove group memberships ────────────────────────────────────────────
+    Write-Host "4. Remove group memberships" -ForegroundColor White
+    $memberships = Get-MgUserMemberOf -UserId $user.Id -All |
+        Where-Object { $_.AdditionalProperties["@odata.type"] -eq "#microsoft.graph.group" }
+    if (-not $memberships -or @($memberships).Count -eq 0) {
+        Step "No group memberships found"
+    }
+    foreach ($g in $memberships) {
+        $gName = $g.AdditionalProperties["displayName"]
+        if ($dryRun) { Step "Would remove from group: $gName" }
+        else {
+            try { Remove-MgGroupMemberByRef -GroupId $g.Id -DirectoryObjectId $user.Id -ErrorAction Stop; Step "Removed from group: $gName" }
+            catch { Write-Warning ("    Could not remove from '{0}' (may be dynamic/synced): {1}" -f $gName, $_.Exception.Message) }
+        }
+    }
+
+    # ── 5. Convert mailbox to shared ───────────────────────────────────────────
+    # Done BEFORE license removal: removing the Exchange license first can put
+    # the mailbox into a deprovisioning state and break the conversion.
+    Write-Host "5. Convert mailbox to shared" -ForegroundColor White
+    if ($SkipMailboxConversion -eq "true") { Step "Skipped (SkipMailboxConversion set)" }
+    else {
+        $mbx = Get-Mailbox -Identity $user.UserPrincipalName -ErrorAction SilentlyContinue
+        if (-not $mbx) { Step "No mailbox found - skipped" }
+        elseif ($mbx.RecipientTypeDetails -eq "SharedMailbox") { Step "Already a shared mailbox" }
+        elseif ($dryRun) { Step "Would convert mailbox to shared" }
+        else { Set-Mailbox -Identity $user.UserPrincipalName -Type Shared; Step "Mailbox converted to shared" }
+    }
+
+    # ── 6. Remove licenses ─────────────────────────────────────────────────────
+    Write-Host "6. Remove licenses" -ForegroundColor White
+    $skuIds = @($user.AssignedLicenses | ForEach-Object { $_.SkuId })
+    if ($skuIds.Count -eq 0) { Step "No licenses assigned" }
+    elseif ($dryRun) { Step ("Would remove {0} license(s)" -f $skuIds.Count) }
+    else {
+        Set-MgUserLicense -UserId $user.Id -AddLicenses @() -RemoveLicenses $skuIds | Out-Null
+        Step ("Removed {0} license(s)" -f $skuIds.Count)
+    }
+
+    # ── 7. Forwarding + auto-reply ─────────────────────────────────────────────
+    if ($ForwardTo -ne "") {
+        Write-Host "7. Forward mail + auto-reply" -ForegroundColor White
+        if ($dryRun) { Step "Would forward mail to '$ForwardTo' and set auto-reply" }
+        else {
+            try {
+                Set-Mailbox -Identity $user.UserPrincipalName -ForwardingAddress $ForwardTo -DeliverToMailboxAndForward $false
+                Step "Forwarding set to $ForwardTo"
+            } catch { Write-Warning ("    Forwarding failed: {0}" -f $_.Exception.Message) }
+            if ($AutoReplyMessage -ne "") {
+                try {
+                    Set-MailboxAutoReplyConfiguration -Identity $user.UserPrincipalName -AutoReplyState Enabled -InternalMessage $AutoReplyMessage -ExternalMessage $AutoReplyMessage -ExternalAudience All
+                    Step "Auto-reply enabled"
+                } catch { Write-Warning ("    Auto-reply failed: {0}" -f $_.Exception.Message) }
+            }
+        }
+    }
+
+    Write-Host ""
+    if ($dryRun) {
+        Write-Host "DRY RUN complete. Re-run with Confirm = YES to apply these changes." -ForegroundColor Yellow
+    } else {
+        Write-Host ("Offboarding complete for {0}" -f $user.UserPrincipalName) -ForegroundColor Green
+    }
+}
+finally {
+    Disconnect-MgGraph
+    Disconnect-ExchangeOnline -Confirm:$false
+}`;
+
+  const offboardScript = await prisma.script.upsert({
+    where: { slug: "offboard-user" },
+    update: {
+      description: "Deprovisions a departing employee: blocks sign-in, revokes sessions, resets the password, removes all group memberships and licenses, converts the mailbox to shared, and optionally forwards mail to the manager with an auto-reply. Safe by default (dry run) unless Confirm is set to YES.",
+      tags: "offboarding,deprovision,leaver,security,exchange,graph",
+      requiresAdmin: true,
+      content: OFFBOARD_USER_SCRIPT,
+    },
+    create: {
+      name: "Offboard / Deprovision User",
+      slug: "offboard-user",
+      description: "Deprovisions a departing employee: blocks sign-in, revokes sessions, resets the password, removes all group memberships and licenses, converts the mailbox to shared, and optionally forwards mail to the manager with an auto-reply. Safe by default (dry run) unless Confirm is set to YES.",
+      categoryId: userMgmt.id,
+      tags: "offboarding,deprovision,leaver,security,exchange,graph",
+      requiresAdmin: true,
+      content: OFFBOARD_USER_SCRIPT,
+    },
+  });
+
+  const offboardParams = [
+    {
+      id: "param-offboard-upn",
+      name: "UserPrincipalName",
+      label: "User Principal Name",
+      type: "STRING" as const,
+      required: true,
+      defaultValue: "",
+      description: "UPN of the departing user to offboard (e.g. jdoe@yrefy.com)",
+      sortOrder: 1,
+    },
+    {
+      id: "param-offboard-forwardto",
+      name: "ForwardTo",
+      label: "Forward Mail To",
+      type: "STRING" as const,
+      required: false,
+      defaultValue: "",
+      description: "Manager UPN to forward the user's mail to. Leave blank to skip forwarding and auto-reply.",
+      sortOrder: 2,
+    },
+    {
+      id: "param-offboard-autoreply",
+      name: "AutoReplyMessage",
+      label: "Auto-Reply Message",
+      type: "MULTILINE" as const,
+      required: false,
+      defaultValue: "",
+      description: "Optional out-of-office message to enable on the mailbox. Only used when Forward Mail To is set.",
+      sortOrder: 3,
+    },
+    {
+      id: "param-offboard-skipmbx",
+      name: "SkipMailboxConversion",
+      label: "Skip Mailbox Conversion",
+      type: "BOOLEAN" as const,
+      required: false,
+      defaultValue: "false",
+      description: "Skip converting the mailbox to shared (e.g. for guests or users without a mailbox).",
+      sortOrder: 4,
+    },
+    {
+      id: "param-offboard-confirm",
+      name: "Confirm",
+      label: "Confirm changes",
+      type: "STRING" as const,
+      required: false,
+      defaultValue: "",
+      description: "Leave blank for a dry run that only previews the offboarding steps. Type YES to actually apply the changes.",
+      sortOrder: 5,
+    },
+  ];
+
+  for (const param of offboardParams) {
+    await prisma.scriptParameter.upsert({
+      where: { id: param.id },
+      update: {},
+      create: { ...param, scriptId: offboardScript.id },
+    });
+  }
+
+  // --- Exchange Online: Message Trace ---
+
+  const MESSAGE_TRACE_SCRIPT = `# Message Trace
+# Requires: ExchangeOnlineManagement module
+# Permissions: Exchange Administrator
+#
+# Traces message delivery for a sender and/or recipient over a date range.
+# Useful for help-desk tickets ("did this email arrive?"). Read-only.
+
+param(
+    [string]$SenderAddress = "",
+    [string]$RecipientAddress = "",
+    # How many days back to search (max 10).
+    [string]$Days = "2",
+    # Optional delivery status filter: Delivered, Failed, Pending, Expanded, Quarantined, FilteredAsSpam
+    [string]$Status = ""
+)
+
+${moduleCheck(["ExchangeOnlineManagement"])}
+
+Connect-ExchangeOnline -AccessToken $env:EXO_TOKEN -UserPrincipalName $env:M365_UPN -ShowBanner:$false
+
+try {
+    if ($SenderAddress -eq "" -and $RecipientAddress -eq "") {
+        Write-Error "Provide at least one of SenderAddress or RecipientAddress."
+        exit 1
+    }
+
+    # The runner passes all params as strings - parse before comparing.
+    $daysInt = 0
+    if (-not [int]::TryParse("$Days", [ref]$daysInt)) { $daysInt = 2 }
+    if ($daysInt -lt 1) { $daysInt = 1 }
+    if ($daysInt -gt 10) {
+        Write-Warning "Message trace supports up to 10 days here; capping at 10."
+        $daysInt = 10
+    }
+
+    $end   = Get-Date
+    $start = $end.AddDays(-$daysInt)
+
+    $params = @{ StartDate = $start; EndDate = $end }
+    if ($SenderAddress -ne "")    { $params.SenderAddress = $SenderAddress }
+    if ($RecipientAddress -ne "") { $params.RecipientAddress = $RecipientAddress }
+    if ($Status -ne "")           { $params.Status = $Status }
+
+    Write-Host ("Tracing messages from {0:yyyy-MM-dd HH:mm} to {1:yyyy-MM-dd HH:mm}..." -f $start, $end) -ForegroundColor Cyan
+    if ($SenderAddress -ne "")    { Write-Host ("  Sender:    {0}" -f $SenderAddress) }
+    if ($RecipientAddress -ne "") { Write-Host ("  Recipient: {0}" -f $RecipientAddress) }
+    if ($Status -ne "")           { Write-Host ("  Status:    {0}" -f $Status) }
+    Write-Host ""
+
+    # Get-MessageTrace was deprecated for WW tenants on 2025-09-01; prefer the
+    # V2 cmdlet (ExchangeOnlineManagement >= 3.7.0) and fall back if missing.
+    $traceCmd = if (Get-Command Get-MessageTraceV2 -ErrorAction SilentlyContinue) { "Get-MessageTraceV2" } else { "Get-MessageTrace" }
+    $results = & $traceCmd @params | Sort-Object Received -Descending
+
+    if (-not $results -or @($results).Count -eq 0) {
+        Write-Host "No messages found for the given criteria." -ForegroundColor Yellow
+        return
+    }
+
+    $results | Select-Object Received, SenderAddress, RecipientAddress, Subject, Status |
+        Format-Table -AutoSize -Wrap
+
+    Write-Host ""
+    Write-Host ("Total messages: {0}" -f @($results).Count) -ForegroundColor Cyan
+}
+finally {
+    Disconnect-ExchangeOnline -Confirm:$false
+}`;
+
+  const messageTraceScript = await prisma.script.upsert({
+    where: { slug: "message-trace" },
+    update: {
+      description: "Traces message delivery in Exchange Online for a sender and/or recipient over a date range (up to 10 days). Read-only - ideal for help-desk 'did this email arrive?' tickets.",
+      tags: "exchange,message-trace,mailflow,helpdesk,report",
+      content: MESSAGE_TRACE_SCRIPT,
+    },
+    create: {
+      name: "Message Trace",
+      slug: "message-trace",
+      description: "Traces message delivery in Exchange Online for a sender and/or recipient over a date range (up to 10 days). Read-only - ideal for help-desk 'did this email arrive?' tickets.",
+      categoryId: mailbox.id,
+      tags: "exchange,message-trace,mailflow,helpdesk,report",
+      content: MESSAGE_TRACE_SCRIPT,
+    },
+  });
+
+  const messageTraceParams = [
+    {
+      id: "param-msgtrace-sender",
+      name: "SenderAddress",
+      label: "Sender Address",
+      type: "STRING" as const,
+      required: false,
+      defaultValue: "",
+      description: "Filter by sender email address. Provide at least one of sender or recipient.",
+      sortOrder: 1,
+    },
+    {
+      id: "param-msgtrace-recipient",
+      name: "RecipientAddress",
+      label: "Recipient Address",
+      type: "STRING" as const,
+      required: false,
+      defaultValue: "",
+      description: "Filter by recipient email address. Provide at least one of sender or recipient.",
+      sortOrder: 2,
+    },
+    {
+      id: "param-msgtrace-days",
+      name: "Days",
+      label: "Days to Search",
+      type: "NUMBER" as const,
+      required: false,
+      defaultValue: "2",
+      description: "How many days back to search (1-10).",
+      sortOrder: 3,
+    },
+    {
+      id: "param-msgtrace-status",
+      name: "Status",
+      label: "Delivery Status",
+      type: "STRING" as const,
+      required: false,
+      defaultValue: "",
+      description: "Optional delivery status filter: Delivered, Failed, Pending, Expanded, Quarantined, FilteredAsSpam.",
+      sortOrder: 4,
+    },
+  ];
+
+  for (const param of messageTraceParams) {
+    await prisma.scriptParameter.upsert({
+      where: { id: param.id },
+      update: {},
+      create: { ...param, scriptId: messageTraceScript.id },
+    });
+  }
+
+  // --- Exchange Online: Manage Shared Mailbox ---
+
+  const SHARED_MAILBOX_SCRIPT = `# Manage Shared Mailbox
+# Requires: ExchangeOnlineManagement module
+# Permissions: Exchange Administrator
+#
+# Creates a shared mailbox (if it does not already exist) and grants the
+# specified members FullAccess and (optionally) SendAs permissions.
+#
+# SAFE BY DEFAULT: with Confirm != "YES" this performs a DRY RUN that only
+# reports what WOULD happen. Set Confirm to YES to apply changes.
+
+param(
+    [Parameter(Mandatory=$true)]
+    [string]$MailboxAddress,
+
+    [string]$DisplayName = "",
+
+    # Comma- or semicolon-separated list of member UPNs to grant access.
+    [string]$Members = "",
+
+    # Also grant SendAs to each member (lets them send AS the shared mailbox).
+    # String on purpose: the runner passes booleans as "true"/"false" strings.
+    [string]$GrantSendAs = "false",
+
+    [string]$Confirm = ""
+)
+
+${moduleCheck(["ExchangeOnlineManagement"])}
+
+Connect-ExchangeOnline -AccessToken $env:EXO_TOKEN -UserPrincipalName $env:M365_UPN -ShowBanner:$false
+
+$dryRun = ($Confirm -ne "YES")
+function Step([string]$msg) { Write-Host ("  -> " + $msg) -ForegroundColor $(if ($dryRun) { "Cyan" } else { "Green" }) }
+
+try {
+    if ($DisplayName -eq "") { $DisplayName = $MailboxAddress.Split("@")[0] }
+
+    if ($dryRun) { Write-Host "DRY RUN (Confirm != 'YES') - no changes will be made." -ForegroundColor Yellow }
+    else { Write-Host "LIVE RUN - changes WILL be applied." -ForegroundColor Red }
+    Write-Host ""
+
+    # ── Ensure mailbox exists ──────────────────────────────────────────────────
+    $mbx = Get-Mailbox -Identity $MailboxAddress -ErrorAction SilentlyContinue
+    Write-Host ("Shared mailbox: {0} <{1}>" -f $DisplayName, $MailboxAddress) -ForegroundColor White
+    if ($mbx) {
+        Step ("Mailbox already exists (Type: {0})" -f $mbx.RecipientTypeDetails)
+    }
+    elseif ($dryRun) { Step "Would create shared mailbox" }
+    else {
+        $mbx = New-Mailbox -Shared -Name $DisplayName -DisplayName $DisplayName -PrimarySmtpAddress $MailboxAddress
+        Step "Shared mailbox created"
+    }
+
+    # ── Grant member permissions ───────────────────────────────────────────────
+    $memberList = @()
+    if ($Members -ne "") {
+        $memberList = $Members -split "[,;]" | ForEach-Object { $_.Trim() } | Where-Object { $_ -ne "" }
+    }
+
+    if ($memberList.Count -eq 0) {
+        Write-Host "No members specified - nothing to grant." -ForegroundColor Yellow
+    }
+
+    foreach ($m in $memberList) {
+        Write-Host ("Member: {0}" -f $m) -ForegroundColor White
+        if ($dryRun) {
+            Step "Would grant FullAccess"
+            if ($GrantSendAs -eq "true") { Step "Would grant SendAs" }
+            continue
+        }
+        try {
+            Add-MailboxPermission -Identity $MailboxAddress -User $m -AccessRights FullAccess -InheritanceType All -AutoMapping $true -ErrorAction Stop | Out-Null
+            Step "FullAccess granted"
+        } catch { Write-Warning ("    FullAccess failed for {0}: {1}" -f $m, $_.Exception.Message) }
+        if ($GrantSendAs -eq "true") {
+            try {
+                Add-RecipientPermission -Identity $MailboxAddress -Trustee $m -AccessRights SendAs -Confirm:$false -ErrorAction Stop | Out-Null
+                Step "SendAs granted"
+            } catch { Write-Warning ("    SendAs failed for {0}: {1}" -f $m, $_.Exception.Message) }
+        }
+    }
+
+    Write-Host ""
+    if ($dryRun) { Write-Host "DRY RUN complete. Re-run with Confirm = YES to apply." -ForegroundColor Yellow }
+    else { Write-Host "Done." -ForegroundColor Green }
+}
+finally {
+    Disconnect-ExchangeOnline -Confirm:$false
+}`;
+
+  const sharedMailboxScript = await prisma.script.upsert({
+    where: { slug: "manage-shared-mailbox" },
+    update: {
+      description: "Creates a shared mailbox if it doesn't exist and grants the specified members FullAccess (and optionally SendAs) permissions. Safe by default (dry run) unless Confirm is set to YES.",
+      tags: "exchange,shared-mailbox,permissions,mailbox",
+      requiresAdmin: true,
+      content: SHARED_MAILBOX_SCRIPT,
+    },
+    create: {
+      name: "Manage Shared Mailbox",
+      slug: "manage-shared-mailbox",
+      description: "Creates a shared mailbox if it doesn't exist and grants the specified members FullAccess (and optionally SendAs) permissions. Safe by default (dry run) unless Confirm is set to YES.",
+      categoryId: mailbox.id,
+      tags: "exchange,shared-mailbox,permissions,mailbox",
+      requiresAdmin: true,
+      content: SHARED_MAILBOX_SCRIPT,
+    },
+  });
+
+  const sharedMailboxParams = [
+    {
+      id: "param-sharedmbx-address",
+      name: "MailboxAddress",
+      label: "Mailbox Address",
+      type: "STRING" as const,
+      required: true,
+      defaultValue: "",
+      description: "Primary SMTP address of the shared mailbox (e.g. support@yrefy.com).",
+      sortOrder: 1,
+    },
+    {
+      id: "param-sharedmbx-displayname",
+      name: "DisplayName",
+      label: "Display Name",
+      type: "STRING" as const,
+      required: false,
+      defaultValue: "",
+      description: "Display name for the mailbox. Defaults to the local part of the address.",
+      sortOrder: 2,
+    },
+    {
+      id: "param-sharedmbx-members",
+      name: "Members",
+      label: "Members",
+      type: "STRING" as const,
+      required: false,
+      defaultValue: "",
+      description: "Comma- or semicolon-separated list of member UPNs to grant FullAccess.",
+      sortOrder: 3,
+    },
+    {
+      id: "param-sharedmbx-sendas",
+      name: "GrantSendAs",
+      label: "Grant SendAs",
+      type: "BOOLEAN" as const,
+      required: false,
+      defaultValue: "false",
+      description: "Also grant SendAs so members can send as the shared mailbox.",
+      sortOrder: 4,
+    },
+    {
+      id: "param-sharedmbx-confirm",
+      name: "Confirm",
+      label: "Confirm changes",
+      type: "STRING" as const,
+      required: false,
+      defaultValue: "",
+      description: "Leave blank for a dry run that only previews changes. Type YES to actually create the mailbox and grant permissions.",
+      sortOrder: 5,
+    },
+  ];
+
+  for (const param of sharedMailboxParams) {
+    await prisma.scriptParameter.upsert({
+      where: { id: param.id },
+      update: {},
+      create: { ...param, scriptId: sharedMailboxScript.id },
+    });
+  }
+
   // --- User Provisioning Scripts ---
 
   const newUserScript = await prisma.script.upsert({
@@ -2704,7 +3502,7 @@ finally {
 
   console.log("Seed completed successfully!");
   console.log("  Categories: 7");
-  console.log("  Scripts: 12");
+  console.log("  Scripts: 15");
 }
 
 main()
