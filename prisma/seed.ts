@@ -1718,7 +1718,7 @@ finally {
 
 ${moduleCheck(["ExchangeOnlineManagement"])}
 
-Connect-ExchangeOnline -AccessToken $env:EXO_TOKEN -UserPrincipalName $env:M365_UPN -ShowBanner:$false
+Connect-ExchangeOnline -AppId $env:EXO_APP_ID -CertificateFilePath $env:EXO_CERT_PATH -CertificatePassword (ConvertTo-SecureString $env:EXO_CERT_PASSWORD -AsPlainText -Force) -Organization $env:EXO_ORGANIZATION -ShowBanner:$false -SkipLoadingFormatData
 
 try {
     $mailboxes = Get-EXOMailbox -ResultSize Unlimited -Properties DisplayName, UserPrincipalName
@@ -1756,7 +1756,7 @@ finally {
 
 ${moduleCheck(["ExchangeOnlineManagement"])}
 
-Connect-ExchangeOnline -AccessToken $env:EXO_TOKEN -UserPrincipalName $env:M365_UPN -ShowBanner:$false
+Connect-ExchangeOnline -AppId $env:EXO_APP_ID -CertificateFilePath $env:EXO_CERT_PATH -CertificatePassword (ConvertTo-SecureString $env:EXO_CERT_PASSWORD -AsPlainText -Force) -Organization $env:EXO_ORGANIZATION -ShowBanner:$false -SkipLoadingFormatData
 
 try {
     $mailboxes = Get-EXOMailbox -ResultSize Unlimited -Properties DisplayName, UserPrincipalName
@@ -1808,7 +1808,7 @@ param(
 
 ${moduleCheck(["ExchangeOnlineManagement"])}
 
-Connect-ExchangeOnline -AccessToken $env:EXO_TOKEN -UserPrincipalName $env:M365_UPN -ShowBanner:$false
+Connect-ExchangeOnline -AppId $env:EXO_APP_ID -CertificateFilePath $env:EXO_CERT_PATH -CertificatePassword (ConvertTo-SecureString $env:EXO_CERT_PASSWORD -AsPlainText -Force) -Organization $env:EXO_ORGANIZATION -ShowBanner:$false -SkipLoadingFormatData
 
 try {
     $params = @{
@@ -1856,7 +1856,7 @@ param(
 
 ${moduleCheck(["ExchangeOnlineManagement"])}
 
-Connect-ExchangeOnline -AccessToken $env:EXO_TOKEN -UserPrincipalName $env:M365_UPN -ShowBanner:$false
+Connect-ExchangeOnline -AppId $env:EXO_APP_ID -CertificateFilePath $env:EXO_CERT_PATH -CertificatePassword (ConvertTo-SecureString $env:EXO_CERT_PASSWORD -AsPlainText -Force) -Organization $env:EXO_ORGANIZATION -ShowBanner:$false -SkipLoadingFormatData
 
 try {
     $params = @{
@@ -1910,7 +1910,7 @@ ${moduleCheck(["Microsoft.Graph.Authentication", "Microsoft.Graph.Users", "Excha
 
 # ── Connect to services ──────────────────────────────────────────────────────
 Connect-MgGraph -AccessToken (ConvertTo-SecureString $env:GRAPH_TOKEN -AsPlainText -Force) -NoWelcome
-Connect-ExchangeOnline -AccessToken $env:EXO_TOKEN -UserPrincipalName $env:M365_UPN -ShowBanner:$false
+Connect-ExchangeOnline -AppId $env:EXO_APP_ID -CertificateFilePath $env:EXO_CERT_PATH -CertificatePassword (ConvertTo-SecureString $env:EXO_CERT_PASSWORD -AsPlainText -Force) -Organization $env:EXO_ORGANIZATION -ShowBanner:$false -SkipLoadingFormatData
 
 try {
     # ── Validate the distribution list ────────────────────────────────────────
@@ -2041,7 +2041,7 @@ ${moduleCheck(["Microsoft.Graph.Authentication", "Microsoft.Graph.Users", "Excha
 
 # ── Connect to services ──────────────────────────────────────────────────────
 Connect-MgGraph -AccessToken (ConvertTo-SecureString $env:GRAPH_TOKEN -AsPlainText -Force) -NoWelcome
-Connect-ExchangeOnline -AccessToken $env:EXO_TOKEN -UserPrincipalName $env:M365_UPN -ShowBanner:$false
+Connect-ExchangeOnline -AppId $env:EXO_APP_ID -CertificateFilePath $env:EXO_CERT_PATH -CertificatePassword (ConvertTo-SecureString $env:EXO_CERT_PASSWORD -AsPlainText -Force) -Organization $env:EXO_ORGANIZATION -ShowBanner:$false -SkipLoadingFormatData
 
 try {
     # ── Validate the distribution list ────────────────────────────────────────
@@ -2203,7 +2203,10 @@ finally {
 # (interactive or non-interactive) within the lookback window. Disabled
 # accounts and users who have never signed in are also treated as inactive.
 # Defaults to teamyrefy@yrefy.com; set AllDistributionLists to "YES" to run
-# against every distribution list in the tenant.
+# against every distribution list and Microsoft 365 Group in the tenant.
+#
+# Supports both classic distribution lists and Microsoft 365 Groups
+# (GroupMailbox) - the correct cmdlets are chosen per group type.
 #
 # Only user mailbox members are evaluated - nested groups, shared mailboxes,
 # and mail contacts are left untouched.
@@ -2227,7 +2230,7 @@ ${moduleCheck(["Microsoft.Graph.Authentication", "Microsoft.Graph.Users", "Excha
 
 # ── Connect to services ──────────────────────────────────────────────────────
 Connect-MgGraph -AccessToken (ConvertTo-SecureString $env:GRAPH_TOKEN -AsPlainText -Force) -NoWelcome
-Connect-ExchangeOnline -AccessToken $env:EXO_TOKEN -UserPrincipalName $env:M365_UPN -ShowBanner:$false
+Connect-ExchangeOnline -AppId $env:EXO_APP_ID -CertificateFilePath $env:EXO_CERT_PATH -CertificatePassword (ConvertTo-SecureString $env:EXO_CERT_PASSWORD -AsPlainText -Force) -Organization $env:EXO_ORGANIZATION -ShowBanner:$false -SkipLoadingFormatData
 
 try {
     # ── Validate parameters ───────────────────────────────────────────────────
@@ -2239,20 +2242,45 @@ try {
     $cutoff = (Get-Date).ToUniversalTime().AddDays(-$days)
     Write-Host ("Inactivity cutoff: {0:yyyy-MM-dd HH:mm} UTC ({1} days)" -f $cutoff, $days) -ForegroundColor Cyan
 
-    # ── Resolve target distribution list(s) ───────────────────────────────────
+    # ── Resolve target group(s) ───────────────────────────────────────────────
+    # Each target is wrapped with an IsUnified flag so the right cmdlets are
+    # used later (M365 Groups reject the Get-/Remove-DistributionGroup* cmdlets).
+    function Wrap-Group([object]$g, [bool]$unified) {
+        [PSCustomObject]@{
+            Identity           = $g.Identity
+            DisplayName        = $g.DisplayName
+            PrimarySmtpAddress = $g.PrimarySmtpAddress
+            IsUnified          = $unified
+        }
+    }
+
+    $dls = @()
     if ($AllDistributionLists -eq "YES") {
-        Write-Host "Loading ALL distribution lists in the tenant..." -ForegroundColor Cyan
-        $dls = @(Get-DistributionGroup -ResultSize Unlimited -ErrorAction Stop)
+        Write-Host "Loading ALL distribution lists and Microsoft 365 Groups in the tenant..." -ForegroundColor Cyan
+        $dls += @(Get-DistributionGroup -ResultSize Unlimited -ErrorAction Stop | ForEach-Object { Wrap-Group $_ $false })
+        $dls += @(Get-UnifiedGroup -ResultSize Unlimited -ErrorAction Stop | ForEach-Object { Wrap-Group $_ $true })
     } else {
-        Write-Host "Validating DL '$DistributionList' exists in Exchange Online..." -ForegroundColor Cyan
-        $dls = @(Get-DistributionGroup -Identity $DistributionList -ErrorAction Stop)
+        Write-Host "Resolving '$DistributionList' in Exchange Online..." -ForegroundColor Cyan
+        $rcpt = Get-Recipient -Identity $DistributionList -ErrorAction Stop
+        switch ($rcpt.RecipientTypeDetails) {
+            "GroupMailbox" {
+                $g = Get-UnifiedGroup -Identity $DistributionList -ErrorAction Stop
+                $dls += Wrap-Group $g $true
+                Write-Host "  Target is a Microsoft 365 Group." -ForegroundColor Cyan
+            }
+            default {
+                $g = Get-DistributionGroup -Identity $DistributionList -ErrorAction Stop
+                $dls += Wrap-Group $g $false
+                Write-Host "  Target is a distribution list." -ForegroundColor Cyan
+            }
+        }
     }
 
     if ($dls.Count -eq 0) {
-        Write-Warning "No distribution lists found. Nothing to do."
+        Write-Warning "No groups found. Nothing to do."
         return
     }
-    Write-Host ("Distribution lists to process: {0}" -f $dls.Count) -ForegroundColor Green
+    Write-Host ("Groups to process: {0}" -f $dls.Count) -ForegroundColor Green
 
     # ── Build sign-in activity lookup from Graph ──────────────────────────────
     Write-Host "Fetching sign-in activity for all users from Graph (this can take a minute)..." -ForegroundColor Cyan
@@ -2292,7 +2320,11 @@ try {
         Write-Host ("── {0} <{1}>" -f $dl.DisplayName, $dl.PrimarySmtpAddress) -ForegroundColor Cyan
 
         try {
-            $members = @(Get-DistributionGroupMember -Identity $dl.Identity -ResultSize Unlimited -ErrorAction Stop)
+            if ($dl.IsUnified) {
+                $members = @(Get-UnifiedGroupLinks -Identity $dl.Identity -LinkType Members -ResultSize Unlimited -ErrorAction Stop)
+            } else {
+                $members = @(Get-DistributionGroupMember -Identity $dl.Identity -ResultSize Unlimited -ErrorAction Stop)
+            }
         } catch {
             Write-Warning ("Failed to read members of '{0}': {1}" -f $dl.PrimarySmtpAddress, $_.Exception.Message)
             continue
@@ -2349,7 +2381,11 @@ try {
 
         foreach ($i in $inactive) {
             try {
-                Remove-DistributionGroupMember -Identity $dl.Identity -Member $i.Address -Confirm:$false -ErrorAction Stop
+                if ($dl.IsUnified) {
+                    Remove-UnifiedGroupLinks -Identity $dl.Identity -LinkType Members -Links $i.Address -Confirm:$false -ErrorAction Stop
+                } else {
+                    Remove-DistributionGroupMember -Identity $dl.Identity -Member $i.Address -Confirm:$false -ErrorAction Stop
+                }
                 $totalRemoved++
                 Write-Host ("  Removed: {0} <{1}>" -f $i.DisplayName, $i.Address) -ForegroundColor Green
             } catch {
@@ -2362,7 +2398,7 @@ try {
     # ── Summary ───────────────────────────────────────────────────────────────
     Write-Host ""
     Write-Host "Done." -ForegroundColor Green
-    Write-Host ("Lists processed:  {0}" -f $dls.Count)
+    Write-Host ("Groups processed: {0}" -f $dls.Count)
     Write-Host ("Inactive flagged: {0}" -f $totalFlagged)
     if ($Confirm -eq "YES") {
         Write-Host ("Removed:          {0}" -f $totalRemoved)
@@ -2380,8 +2416,8 @@ finally {
     where: { slug: "remove-inactive-from-distribution-list" },
     update: {
       description:
-        "Removes members with no Entra ID sign-in activity within the lookback window (default 30 days) from a distribution list. Defaults to teamyrefy@yrefy.com, or can run against every distribution list in the tenant. Dry run by default.",
-      tags: "exchange,distribution-list,inactive,cleanup,graph",
+        "Removes members with no Entra ID sign-in activity within the lookback window (default 30 days) from a distribution list or Microsoft 365 Group. Defaults to teamyrefy@yrefy.com, or can run against every DL and M365 Group in the tenant. Dry run by default.",
+      tags: "exchange,distribution-list,m365-group,inactive,cleanup,graph",
       requiresAdmin: true,
       content: REMOVE_INACTIVE_DL_SCRIPT,
     },
@@ -2389,9 +2425,9 @@ finally {
       name: "Remove Inactive Members from Distribution List",
       slug: "remove-inactive-from-distribution-list",
       description:
-        "Removes members with no Entra ID sign-in activity within the lookback window (default 30 days) from a distribution list. Defaults to teamyrefy@yrefy.com, or can run against every distribution list in the tenant. Dry run by default.",
+        "Removes members with no Entra ID sign-in activity within the lookback window (default 30 days) from a distribution list or Microsoft 365 Group. Defaults to teamyrefy@yrefy.com, or can run against every DL and M365 Group in the tenant. Dry run by default.",
       categoryId: mailbox.id,
-      tags: "exchange,distribution-list,inactive,cleanup,graph",
+      tags: "exchange,distribution-list,m365-group,inactive,cleanup,graph",
       requiresAdmin: true,
       content: REMOVE_INACTIVE_DL_SCRIPT,
     },
@@ -2406,7 +2442,7 @@ finally {
       required: false,
       defaultValue: "teamyrefy@yrefy.com",
       description:
-        "The distribution list to clean up (display name or email address). Ignored when 'All distribution lists' is set to YES.",
+        "The distribution list or Microsoft 365 Group to clean up (display name or email address). Ignored when 'All distribution lists' is set to YES.",
       sortOrder: 1,
     },
     {
@@ -2417,7 +2453,7 @@ finally {
       required: false,
       defaultValue: "",
       description:
-        "Type YES to process every distribution list in the tenant instead of the single list above.",
+        "Type YES to process every distribution list and Microsoft 365 Group in the tenant instead of the single target above.",
       sortOrder: 2,
     },
     {
@@ -2942,7 +2978,7 @@ param(
 ${moduleCheck(["Microsoft.Graph.Authentication", "Microsoft.Graph.Users", "Microsoft.Graph.Users.Actions", "Microsoft.Graph.Groups", "ExchangeOnlineManagement"])}
 
 Connect-MgGraph -AccessToken (ConvertTo-SecureString $env:GRAPH_TOKEN -AsPlainText -Force) -NoWelcome
-Connect-ExchangeOnline -AccessToken $env:EXO_TOKEN -UserPrincipalName $env:M365_UPN -ShowBanner:$false
+Connect-ExchangeOnline -AppId $env:EXO_APP_ID -CertificateFilePath $env:EXO_CERT_PATH -CertificatePassword (ConvertTo-SecureString $env:EXO_CERT_PASSWORD -AsPlainText -Force) -Organization $env:EXO_ORGANIZATION -ShowBanner:$false -SkipLoadingFormatData
 
 $dryRun = ($Confirm -ne "YES")
 function Step([string]$msg) { Write-Host ("  -> " + $msg) -ForegroundColor $(if ($dryRun) { "Cyan" } else { "Green" }) }
@@ -3146,7 +3182,7 @@ param(
 
 ${moduleCheck(["ExchangeOnlineManagement"])}
 
-Connect-ExchangeOnline -AccessToken $env:EXO_TOKEN -UserPrincipalName $env:M365_UPN -ShowBanner:$false
+Connect-ExchangeOnline -AppId $env:EXO_APP_ID -CertificateFilePath $env:EXO_CERT_PATH -CertificatePassword (ConvertTo-SecureString $env:EXO_CERT_PASSWORD -AsPlainText -Force) -Organization $env:EXO_ORGANIZATION -ShowBanner:$false -SkipLoadingFormatData
 
 try {
     if ($SenderAddress -eq "" -and $RecipientAddress -eq "") {
@@ -3295,7 +3331,7 @@ param(
 
 ${moduleCheck(["ExchangeOnlineManagement"])}
 
-Connect-ExchangeOnline -AccessToken $env:EXO_TOKEN -UserPrincipalName $env:M365_UPN -ShowBanner:$false
+Connect-ExchangeOnline -AppId $env:EXO_APP_ID -CertificateFilePath $env:EXO_CERT_PATH -CertificatePassword (ConvertTo-SecureString $env:EXO_CERT_PASSWORD -AsPlainText -Force) -Organization $env:EXO_ORGANIZATION -ShowBanner:$false -SkipLoadingFormatData
 
 $dryRun = ($Confirm -ne "YES")
 function Step([string]$msg) { Write-Host ("  -> " + $msg) -ForegroundColor $(if ($dryRun) { "Cyan" } else { "Green" }) }

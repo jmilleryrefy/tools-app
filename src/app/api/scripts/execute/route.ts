@@ -126,24 +126,41 @@ export async function POST(req: NextRequest) {
     );
   }
 
-  // Acquire the signed-in user's Microsoft 365 delegated access tokens so the
-  // script connects to Graph / Exchange Online AS this user (no device code).
-  // Only mint tokens for the services the script actually connects to, so a
-  // Graph-only script isn't blocked by missing Exchange Online consent (and we
-  // skip the redemption entirely for scripts that need neither).
-  // Done before creating the execution record so a token failure doesn't leave
-  // a dangling RUNNING row.
+  // Acquire Microsoft 365 credentials for the services the script connects to:
+  // - Microsoft Graph: delegated access token minted from the signed-in user's
+  //   refresh token, so Graph calls run AS this user.
+  // - Exchange Online: app-only certificate authentication. Exchange Online
+  //   rejects the legacy PowerShell endpoint for delegated tokens issued to
+  //   custom apps (empty 403), so scripts connect as the app's service
+  //   principal via Connect-ExchangeOnline -AppId/-CertificateFilePath.
+  // Done before creating the execution record so a failure doesn't leave a
+  // dangling RUNNING row.
   const needs = detectM365Needs(script.content);
   let m365Tokens = null;
-  if (needs.graph || needs.exo) {
+  if (needs.graph) {
     try {
-      m365Tokens = await getM365TokensForUser(session.user.id, needs);
+      m365Tokens = await getM365TokensForUser(session.user.id, {
+        graph: true,
+        exo: false,
+      });
     } catch (err) {
       const message =
         err instanceof M365TokenError
           ? err.message
           : "Failed to obtain Microsoft 365 access for your account.";
       return NextResponse.json({ error: message }, { status: 403 });
+    }
+  }
+
+  if (needs.exo) {
+    if (!process.env.EXO_CERT_PATH || !process.env.EXO_CERT_PASSWORD) {
+      return NextResponse.json(
+        {
+          error:
+            "Exchange Online certificate authentication is not configured on the server (EXO_CERT_PATH / EXO_CERT_PASSWORD).",
+        },
+        { status: 500 }
+      );
     }
   }
 
@@ -207,10 +224,12 @@ export async function POST(req: NextRequest) {
 
       send("execution_id", executionId);
 
-      // Delegated M365 tokens for the signed-in user. Passed via env (never
-      // written to disk or argv) so scripts can connect without a device code:
-      // Connect-MgGraph -AccessToken (...) / Connect-ExchangeOnline -AccessToken ...
-      // Only the tokens the script needs are present (see detectM365Needs).
+      // M365 credentials for the script, passed via env (never written to
+      // disk or argv):
+      // - GRAPH_TOKEN: delegated token -> Connect-MgGraph -AccessToken (...)
+      // - EXO_APP_ID / EXO_ORGANIZATION / EXO_CERT_PATH / EXO_CERT_PASSWORD:
+      //   app-only certificate auth -> Connect-ExchangeOnline -AppId ...
+      // Only the credentials the script needs are present (see detectM365Needs).
       const env: NodeJS.ProcessEnv = {
         ...process.env,
         TERM: "dumb",
@@ -218,8 +237,15 @@ export async function POST(req: NextRequest) {
       };
       if (m365Tokens) {
         if (m365Tokens.graphToken) env.GRAPH_TOKEN = m365Tokens.graphToken;
-        if (m365Tokens.exoToken) env.EXO_TOKEN = m365Tokens.exoToken;
         env.M365_UPN = m365Tokens.upn;
+      }
+      if (needs.exo) {
+        env.EXO_APP_ID = process.env.AUTH_MICROSOFT_ENTRA_ID_ID;
+        env.EXO_ORGANIZATION =
+          process.env.EXO_ORGANIZATION ||
+          process.env.AUTH_MICROSOFT_ENTRA_ID_TENANT_ID;
+        env.EXO_CERT_PATH = process.env.EXO_CERT_PATH;
+        env.EXO_CERT_PASSWORD = process.env.EXO_CERT_PASSWORD;
       }
 
       const ps = spawn("pwsh", ["-NoProfile", "-NonInteractive", "-File", scriptPath], {
