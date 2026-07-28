@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { auth } from "@/auth";
 import { prisma } from "@/lib/prisma";
 import { getM365TokensForUser, detectM365Needs, M365TokenError } from "@/lib/m365-token";
+import { PS_OUTPUT_PRELUDE } from "@/lib/ps-output-prelude";
 import { spawn } from "child_process";
 import { writeFile, unlink } from "fs/promises";
 import { join } from "path";
@@ -201,19 +202,24 @@ export async function POST(req: NextRequest) {
   const scriptPath = join(tmpdir(), `ittools-${runId}.ps1`);
   await writeFile(scriptPath, psScript, "utf-8");
 
-  // Execute through a wrapper that forces wide output formatting. With
-  // redirected stdout PowerShell formats tables for a narrow console and
-  // squeezes/wraps columns into unreadable output. Piping through
-  // Out-String -Stream -Width renders tables for a wide terminal while
-  // still streaming line by line. Information (Write-Host) and warning
-  // streams are merged into stdout to preserve output order; the error
-  // stream stays on stderr so failures are still reported separately.
+  // Execute through a wrapper that:
+  //  1. Injects the structured-output prelude, which shadows Format-Table /
+  //     Format-List / Write-Host so tables and colored lines reach the UI as
+  //     JSON markers and can be rendered as real HTML (see ps-output-prelude).
+  //  2. Pipes any remaining output through Out-String -Stream -Width so
+  //     anything not covered by the prelude is at least formatted for a wide
+  //     terminal instead of a squeezed 80-column console.
+  // Information (Write-Host) and warning streams are merged into stdout to
+  // preserve output order; the error stream stays on stderr so failures are
+  // still reported separately.
   const wrapperPath = join(tmpdir(), `ittools-${runId}-wrapper.ps1`);
   const wrapper = [
+    PS_OUTPUT_PRELUDE,
     `$ProgressPreference = 'SilentlyContinue'`,
     `& '${scriptPath}' 6>&1 3>&1 |`,
     `    ForEach-Object { if ($_ -is [System.Management.Automation.WarningRecord]) { "WARNING: $_" } else { $_ } } |`,
     `    Out-String -Stream -Width ${OUTPUT_WIDTH}`,
+    `if ($global:__UiNoNewlineBuffer) { Write-Host '' }`,
     `exit $LASTEXITCODE`,
   ].join("\n");
   await writeFile(wrapperPath, wrapper, "utf-8");
