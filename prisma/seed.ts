@@ -380,7 +380,7 @@ if ($CsvPath -and $CsvPath -ne "") {
     # CSV path provided as parameter - go straight to import
     if (-not (Test-Path $CsvPath)) {
         Write-Error "CSV file not found: $CsvPath"
-        Disconnect-MgGraph
+        Disconnect-MgGraph | Out-Null
         exit 1
     }
     $csvUsers = Import-Csv -Path $CsvPath
@@ -389,7 +389,7 @@ if ($CsvPath -and $CsvPath -ne "") {
     foreach ($col in $requiredColumns) {
         if ($col -notin $csvColumns) {
             Write-Error "CSV is missing required column: $col"
-            Disconnect-MgGraph
+            Disconnect-MgGraph | Out-Null
             exit 1
         }
     }
@@ -435,7 +435,7 @@ else {
             Write-Host "  .\\New-UserProvisioning.ps1 -CsvPath \`"$templatePath\`"" -ForegroundColor Yellow
             Write-Host ""
             Write-Host "Or re-run without parameters and choose [C] to import." -ForegroundColor White
-            Disconnect-MgGraph
+            Disconnect-MgGraph | Out-Null
             exit 0
         }
         "C" {
@@ -443,13 +443,13 @@ else {
             $CsvPath = Read-Host "Enter path to CSV file"
             if (-not $CsvPath -or $CsvPath.Trim() -eq "") {
                 Write-Host "No path provided. Exiting." -ForegroundColor Yellow
-                Disconnect-MgGraph
+                Disconnect-MgGraph | Out-Null
                 exit 0
             }
             $CsvPath = $CsvPath.Trim().Trim('"').Trim("'")
             if (-not (Test-Path $CsvPath)) {
                 Write-Error "CSV file not found: $CsvPath"
-                Disconnect-MgGraph
+                Disconnect-MgGraph | Out-Null
                 exit 1
             }
             $csvUsers = Import-Csv -Path $CsvPath
@@ -458,7 +458,7 @@ else {
             foreach ($col in $requiredColumns) {
                 if ($col -notin $csvColumns) {
                     Write-Error "CSV is missing required column: $col"
-                    Disconnect-MgGraph
+                    Disconnect-MgGraph | Out-Null
                     exit 1
                 }
             }
@@ -492,7 +492,7 @@ else {
 
             if ($nameList.Count -eq 0) {
                 Write-Host "No names entered. Exiting." -ForegroundColor Yellow
-                Disconnect-MgGraph
+                Disconnect-MgGraph | Out-Null
                 exit 0
             }
 
@@ -563,7 +563,7 @@ else {
         }
         default {
             Write-Host "Exiting." -ForegroundColor Yellow
-            Disconnect-MgGraph
+            Disconnect-MgGraph | Out-Null
             exit 0
         }
     }
@@ -702,7 +702,7 @@ while (-not $phase1Done) {
         }
         "Q" {
             Write-Host "Aborted by user." -ForegroundColor Yellow
-            Disconnect-MgGraph
+            Disconnect-MgGraph | Out-Null
             exit 0
         }
     }
@@ -765,7 +765,7 @@ while (-not $phase2Done) {
         }
         "Q" {
             Write-Host "Aborted by user." -ForegroundColor Yellow
-            Disconnect-MgGraph
+            Disconnect-MgGraph | Out-Null
             exit 0
         }
     }
@@ -873,7 +873,7 @@ while (-not $phase3Done) {
         }
         "Q" {
             Write-Host "Aborted by user." -ForegroundColor Yellow
-            Disconnect-MgGraph
+            Disconnect-MgGraph | Out-Null
             exit 0
         }
     }
@@ -936,7 +936,7 @@ if ($dupCount -gt 0) {
             }
             "Q" {
                 Write-Host "Aborted by user." -ForegroundColor Yellow
-                Disconnect-MgGraph
+                Disconnect-MgGraph | Out-Null
                 exit 0
             }
         }
@@ -1040,7 +1040,7 @@ while (-not $phase5Done) {
         }
         "Q" {
             Write-Host "Aborted by user." -ForegroundColor Yellow
-            Disconnect-MgGraph
+            Disconnect-MgGraph | Out-Null
             exit 0
         }
     }
@@ -1090,7 +1090,7 @@ Write-Host ""
 $finalChoice = Read-Host "CREATE these $($toCreate.Count) users now? [Y]es / [Q]uit"
 if ($finalChoice.ToUpper() -ne "Y") {
     Write-Host "Aborted. No users were created." -ForegroundColor Yellow
-    Disconnect-MgGraph
+    Disconnect-MgGraph | Out-Null
     exit 0
 }
 
@@ -1315,7 +1315,7 @@ Write-Host ""
 Write-Host "Output files saved to: $OutputDir" -ForegroundColor Cyan
 Write-Host ""
 
-Disconnect-MgGraph
+Disconnect-MgGraph | Out-Null
 Write-Host "Done." -ForegroundColor Green
 `;
 
@@ -1441,7 +1441,7 @@ try {
     Write-Host "\\nTotal licensed users: $count" -ForegroundColor Cyan
 }
 finally {
-    Disconnect-MgGraph
+    Disconnect-MgGraph | Out-Null
 }`,
     },
     create: {
@@ -1484,7 +1484,7 @@ try {
     Write-Host "\\nTotal licensed users: $count" -ForegroundColor Cyan
 }
 finally {
-    Disconnect-MgGraph
+    Disconnect-MgGraph | Out-Null
 }`,
     },
   });
@@ -1546,7 +1546,7 @@ try {
     }
 }
 finally {
-    Disconnect-MgGraph
+    Disconnect-MgGraph | Out-Null
 }`,
     },
     create: {
@@ -1591,7 +1591,7 @@ try {
     }
 }
 finally {
-    Disconnect-MgGraph
+    Disconnect-MgGraph | Out-Null
 }`,
     },
   });
@@ -1646,7 +1646,7 @@ try {
     }
 }
 finally {
-    Disconnect-MgGraph
+    Disconnect-MgGraph | Out-Null
 }`,
     },
     create: {
@@ -1700,7 +1700,7 @@ try {
     }
 }
 finally {
-    Disconnect-MgGraph
+    Disconnect-MgGraph | Out-Null
 }`,
     },
   });
@@ -2009,7 +2009,7 @@ try {
     Write-Host ("No Mail (used UPN): {0}" -f $noMail.Count)
 }
 finally {
-    Disconnect-MgGraph
+    Disconnect-MgGraph | Out-Null
     Disconnect-ExchangeOnline -Confirm:$false
 }`,
     },
@@ -2140,7 +2140,7 @@ try {
     Write-Host ("No Mail (used UPN): {0}" -f $noMail.Count)
 }
 finally {
-    Disconnect-MgGraph
+    Disconnect-MgGraph | Out-Null
     Disconnect-ExchangeOnline -Confirm:$false
 }`,
     },
@@ -2408,7 +2408,7 @@ try {
     }
 }
 finally {
-    Disconnect-MgGraph
+    Disconnect-MgGraph | Out-Null
     Disconnect-ExchangeOnline -Confirm:$false
 }`;
 
@@ -2618,7 +2618,7 @@ try {
     Write-Host "\\nTotal teams: $($report.Count) | Ownerless teams: $ownerless" -ForegroundColor $(if ($ownerless -gt 0) { "Yellow" } else { "Cyan" })
 }
 finally {
-    Disconnect-MgGraph
+    Disconnect-MgGraph | Out-Null
 }`,
     },
     create: {
@@ -2660,7 +2660,7 @@ try {
     Write-Host "\\nTotal teams: $($report.Count) | Ownerless teams: $ownerless" -ForegroundColor $(if ($ownerless -gt 0) { "Yellow" } else { "Cyan" })
 }
 finally {
-    Disconnect-MgGraph
+    Disconnect-MgGraph | Out-Null
 }`,
     },
   });
@@ -2705,7 +2705,7 @@ try {
     Write-Host "\\nTotal role assignments: $($report.Count) across $uniqueAdmins unique admin accounts" -ForegroundColor Cyan
 }
 finally {
-    Disconnect-MgGraph
+    Disconnect-MgGraph | Out-Null
 }`,
     },
     create: {
@@ -2747,7 +2747,7 @@ try {
     Write-Host "\\nTotal role assignments: $($report.Count) across $uniqueAdmins unique admin accounts" -ForegroundColor Cyan
 }
 finally {
-    Disconnect-MgGraph
+    Disconnect-MgGraph | Out-Null
 }`,
     },
   });
@@ -2796,7 +2796,7 @@ try {
     Write-Host "\\nMFA Enabled: $mfaEnabled | MFA Not Configured: $mfaDisabled" -ForegroundColor $(if ($mfaDisabled -gt 0) { "Yellow" } else { "Green" })
 }
 finally {
-    Disconnect-MgGraph
+    Disconnect-MgGraph | Out-Null
 }`,
     },
     create: {
@@ -2844,7 +2844,7 @@ try {
     Write-Host "\\nMFA Enabled: $mfaEnabled | MFA Not Configured: $mfaDisabled" -ForegroundColor $(if ($mfaDisabled -gt 0) { "Yellow" } else { "Green" })
 }
 finally {
-    Disconnect-MgGraph
+    Disconnect-MgGraph | Out-Null
 }`,
     },
   });
@@ -2889,7 +2889,7 @@ try {
     Write-Host "\\nOverall: $totalAssigned / $totalLicenses licenses assigned ($([math]::Round(($totalAssigned/$totalLicenses)*100,1))% utilization)" -ForegroundColor Cyan
 }
 finally {
-    Disconnect-MgGraph
+    Disconnect-MgGraph | Out-Null
 }`,
     },
     create: {
@@ -2931,7 +2931,7 @@ try {
     Write-Host "\\nOverall: $totalAssigned / $totalLicenses licenses assigned ($([math]::Round(($totalAssigned/$totalLicenses)*100,1))% utilization)" -ForegroundColor Cyan
 }
 finally {
-    Disconnect-MgGraph
+    Disconnect-MgGraph | Out-Null
 }`,
     },
   });
@@ -3125,7 +3125,7 @@ try {
     }
 }
 finally {
-    Disconnect-MgGraph
+    Disconnect-MgGraph | Out-Null
 }`;
 
   const idleSeatsScript = await prisma.script.upsert({
@@ -3348,7 +3348,7 @@ try {
     }
 }
 finally {
-    Disconnect-MgGraph
+    Disconnect-MgGraph | Out-Null
     Disconnect-ExchangeOnline -Confirm:$false
 }`;
 

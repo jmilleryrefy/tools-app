@@ -218,9 +218,12 @@ export default function ScriptExecutor({
           </div>
           <pre
             ref={outputRef}
-            className="p-4 text-sm text-gray-300 overflow-x-auto whitespace-pre-wrap font-mono max-h-96 overflow-y-auto"
+            className="p-4 text-sm text-gray-300 overflow-x-auto whitespace-pre font-mono max-h-96 overflow-y-auto"
           >
-            {output || "Waiting for output..."}
+            {output
+              ? // Collapse the 3+ blank-line runs Format-Table produces
+                output.replace(/\n{3,}/g, "\n\n").replace(/^\n+/, "")
+              : "Waiting for output..."}
           </pre>
         </div>
       )}

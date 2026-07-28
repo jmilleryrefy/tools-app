@@ -8,6 +8,10 @@ import { join } from "path";
 import { tmpdir } from "os";
 import { randomUUID } from "crypto";
 
+// Terminal width used when formatting script output (Format-Table etc.).
+// Wide enough for real report tables; the UI scrolls horizontally.
+const OUTPUT_WIDTH = 220;
+
 /**
  * Remove the top-level param(...) block from a PowerShell script string.
  * Handles nested parentheses (e.g. [Parameter(Mandatory=$true)]) and
@@ -193,8 +197,26 @@ export async function POST(req: NextRequest) {
   // Using -File instead of -Command with stdin avoids a known issue where
   // Format-Table and other formatting cmdlets hang or lose output when
   // PowerShell reads a multiline script from stdin.
-  const scriptPath = join(tmpdir(), `ittools-${randomUUID()}.ps1`);
+  const runId = randomUUID();
+  const scriptPath = join(tmpdir(), `ittools-${runId}.ps1`);
   await writeFile(scriptPath, psScript, "utf-8");
+
+  // Execute through a wrapper that forces wide output formatting. With
+  // redirected stdout PowerShell formats tables for a narrow console and
+  // squeezes/wraps columns into unreadable output. Piping through
+  // Out-String -Stream -Width renders tables for a wide terminal while
+  // still streaming line by line. Information (Write-Host) and warning
+  // streams are merged into stdout to preserve output order; the error
+  // stream stays on stderr so failures are still reported separately.
+  const wrapperPath = join(tmpdir(), `ittools-${runId}-wrapper.ps1`);
+  const wrapper = [
+    `$ProgressPreference = 'SilentlyContinue'`,
+    `& '${scriptPath}' 6>&1 3>&1 |`,
+    `    ForEach-Object { if ($_ -is [System.Management.Automation.WarningRecord]) { "WARNING: $_" } else { $_ } } |`,
+    `    Out-String -Stream -Width ${OUTPUT_WIDTH}`,
+    `exit $LASTEXITCODE`,
+  ].join("\n");
+  await writeFile(wrapperPath, wrapper, "utf-8");
 
   const timeoutMs = parseInt(process.env.SCRIPT_TIMEOUT_MS || "120000", 10);
   const executionId = execution.id;
@@ -220,6 +242,7 @@ export async function POST(req: NextRequest) {
 
       function cleanup() {
         unlink(scriptPath).catch(() => {});
+        unlink(wrapperPath).catch(() => {});
       }
 
       send("execution_id", executionId);
@@ -248,7 +271,7 @@ export async function POST(req: NextRequest) {
         env.EXO_CERT_PASSWORD = process.env.EXO_CERT_PASSWORD;
       }
 
-      const ps = spawn("pwsh", ["-NoProfile", "-NonInteractive", "-File", scriptPath], {
+      const ps = spawn("pwsh", ["-NoProfile", "-NonInteractive", "-File", wrapperPath], {
         stdio: ["ignore", "pipe", "pipe"],
         env,
       });
