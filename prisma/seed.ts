@@ -2936,6 +2936,276 @@ finally {
     },
   });
 
+  // --- Reporting: Idle Seat Report ---
+
+  const IDLE_SEATS_SCRIPT = `# Idle Seat Report - purchased M365 seats not assigned to anyone
+# Requires: Microsoft.Graph PowerShell module
+# Permissions: Organization.Read.All
+#
+# Read-only. Compares purchased seats against consumed seats for every SKU in
+# the tenant, filters out free and viral tiers, and ranks the remainder by
+# estimated annual cost.
+#
+# This script cannot reduce seat counts. There is no Graph API for changing
+# subscription quantity. Reductions happen in the Microsoft 365 admin center
+# under Billing > Your products, or through your CSP or EA contact.
+
+param(
+    # Seats to leave unassigned per SKU as hiring headroom. The Reducible
+    # column subtracts this from idle seats so you get a defensible target
+    # number rather than trimming to the bone.
+    [string]$Buffer = "5",
+
+    # SKUs with this many or more purchased seats are treated as free/viral
+    # tiers and excluded from the waste tables.
+    [string]$ViralSeatThreshold = "10000",
+
+    # Idle seats on subscriptions renewing within this many days are flagged
+    # as urgent: once a term renews, the quantity is locked until next cycle.
+    [string]$RenewalWindowDays = "45",
+
+    # Comma- or semicolon-separated SkuPartNumbers suppressed from every
+    # section of the report, including the CSV. Wildcards supported.
+    [string]$ExcludeSkus = "DYN365_BUSCENTRAL_ESSENTIAL,DYN365_FINANCIALS_ACCOUNTANT_SKU",
+
+    # Optional path to write the full report as CSV.
+    [string]$CsvPath = ""
+)
+
+${moduleCheck(["Microsoft.Graph.Authentication", "Microsoft.Graph.Identity.DirectoryManagement"])}
+
+Connect-MgGraph -AccessToken (ConvertTo-SecureString $env:GRAPH_TOKEN -AsPlainText -Force) -NoWelcome
+
+# Monthly list price per seat. Edit to match your actual agreement.
+# Unlisted SKUs report 0 rather than a guessed figure.
+$MonthlyCostPerSeat = @{
+    'SPB'                       = 22.00   # M365 Business Premium
+    'Microsoft_Intune_Suite'    = 10.00
+    'EXCHANGESTANDARD'          = 4.00    # Exchange Online Plan 1
+    'EXCHANGEENTERPRISE'        = 8.00    # Exchange Online Plan 2
+    'PROJECTPROFESSIONAL'       = 30.00   # Project Plan 3
+    'PROJECTPREMIUM'            = 55.00   # Project Plan 5
+    'POWER_BI_PRO'              = 14.00
+    'PBI_PREMIUM_PER_USER'      = 24.00
+    'Microsoft_Teams_Rooms_Pro' = 40.00
+    'VISIOCLIENT'               = 15.00   # Visio Plan 2
+    'MCOCAP'                    = 8.00    # Teams Shared Devices
+    'Microsoft_365_E5_(no_Teams)'    = 54.75
+    'Microsoft_Teams_Enterprise_New' = 5.25
+    # Windows 365 Cloud PC. Highest per-seat rates in the tenant.
+    'CPC_E_4C_16GB_128GB'       = 57.00
+    'CPC_E_4C_16GB_256GB'       = 66.00
+    'CPC_E_8C_32GB_512GB'       = 162.00
+}
+
+try {
+    # ── Validate parameters ───────────────────────────────────────────────────
+    $bufferInt = 0
+    if (-not [int]::TryParse("$Buffer", [ref]$bufferInt) -or $bufferInt -lt 0) { $bufferInt = 5 }
+    $viralInt = 0
+    if (-not [int]::TryParse("$ViralSeatThreshold", [ref]$viralInt) -or $viralInt -lt 1) { $viralInt = 10000 }
+    $windowInt = 0
+    if (-not [int]::TryParse("$RenewalWindowDays", [ref]$windowInt) -or $windowInt -lt 1) { $windowInt = 45 }
+
+    $excludeList = @("$ExcludeSkus" -split '[,;]' | ForEach-Object { $_.Trim() } | Where-Object { $_ })
+
+    # ── Renewal dates ─────────────────────────────────────────────────────────
+    # Renewal dates are not exposed on subscribedSku. The beta directory
+    # subscriptions endpoint carries nextLifecycleDateTime. Beta, so treat a
+    # failure here as non-fatal and fall back to a report without dates.
+    $renewalMap = @{}
+    try {
+        $subs = (Invoke-MgGraphRequest -Method GET -OutputType PSObject -Uri 'https://graph.microsoft.com/beta/directory/subscriptions').value
+
+        foreach ($s in $subs) {
+            if ($s.status -notin @('Enabled', 'Warning')) { continue }
+            if (-not $s.nextLifecycleDateTime)            { continue }
+
+            $when = [datetime]$s.nextLifecycleDateTime
+            $key  = $s.skuPartNumber
+
+            # A SKU can span several subscriptions. Keep the soonest, since that
+            # is the next decision point, and count how many there are.
+            if (-not $renewalMap.ContainsKey($key)) {
+                $renewalMap[$key] = [pscustomobject]@{ Next = $when; Count = 1 }
+            }
+            else {
+                $renewalMap[$key].Count++
+                if ($when -lt $renewalMap[$key].Next) { $renewalMap[$key].Next = $when }
+            }
+        }
+    }
+    catch {
+        Write-Warning "Could not read renewal dates from the beta endpoint: $($_.Exception.Message)"
+    }
+
+    # ── Build report ──────────────────────────────────────────────────────────
+    $report = Get-MgSubscribedSku -All | Where-Object {
+        $sku = $_.SkuPartNumber
+        -not ($excludeList | Where-Object { $sku -like $_ })
+    } | ForEach-Object {
+
+        $enabled  = $_.PrepaidUnits.Enabled
+        $consumed = $_.ConsumedUnits
+        $idle     = $enabled - $consumed
+        $rate     = if ($MonthlyCostPerSeat.ContainsKey($_.SkuPartNumber)) { $MonthlyCostPerSeat[$_.SkuPartNumber] } else { 0 }
+
+        $ren      = if ($renewalMap.ContainsKey($_.SkuPartNumber)) { $renewalMap[$_.SkuPartNumber] } else { $null }
+        $nextDate = if ($ren) { $ren.Next } else { $null }
+        $daysOut  = if ($nextDate) { [math]::Round(($nextDate - (Get-Date)).TotalDays) } else { $null }
+
+        [pscustomobject]@{
+            SkuPartNumber   = $_.SkuPartNumber
+            Purchased       = $enabled
+            Assigned        = $consumed
+            Idle            = $idle
+            Reducible       = [math]::Max(0, $idle - $bufferInt)
+            PctIdle         = if ($enabled) { [math]::Round(($idle / $enabled) * 100, 1) } else { 0 }
+            RatePerSeat     = $rate
+            EstAnnualWaste  = [math]::Round($idle * $rate * 12, 2)
+            NextRenewal     = if ($nextDate) { $nextDate.ToString('yyyy-MM-dd') } else { 'unknown' }
+            DaysToRenewal   = $daysOut
+            SubCount        = if ($ren) { $ren.Count } else { $null }
+            SuspendedSeats  = $_.PrepaidUnits.Suspended
+            WarningSeats    = $_.PrepaidUnits.Warning
+            IsFreeOrViral   = ($enabled -ge $viralInt)
+            SkuId           = $_.SkuId
+        }
+    }
+
+    # Anything with idle seats and a renewal inside the action window. This is
+    # the only list with a deadline attached: once a term renews, the quantity
+    # is locked until the next cycle.
+    $urgent = $report | Where-Object {
+        -not $_.IsFreeOrViral -and $_.Idle -gt $bufferInt -and
+        $null -ne $_.DaysToRenewal -and $_.DaysToRenewal -le $windowInt
+    } | Sort-Object DaysToRenewal
+
+    if ($urgent) {
+        Write-Host ''
+        Write-Host "ACT BEFORE RENEWAL - idle seats on subscriptions renewing within $windowInt days" -ForegroundColor Red
+        $urgent | Format-Table SkuPartNumber, Purchased, Assigned, Reducible, NextRenewal, DaysToRenewal, SubCount, EstAnnualWaste -AutoSize
+    }
+
+    $paid = $report | Where-Object { -not $_.IsFreeOrViral -and $_.Idle -gt 0 } |
+            Sort-Object EstAnnualWaste, Idle -Descending
+
+    Write-Host ''
+    Write-Host 'Purchased seats with nobody assigned' -ForegroundColor Cyan
+    Write-Host "(free and viral tiers excluded; buffer of $bufferInt seats reserved per SKU)" -ForegroundColor DarkGray
+    Write-Host ''
+
+    $paid | Format-Table SkuPartNumber, Purchased, Assigned, Idle, Reducible, PctIdle, NextRenewal, DaysToRenewal, EstAnnualWaste -AutoSize
+
+    $totalIdle  = ($paid | Measure-Object Idle           -Sum).Sum
+    $totalRed   = ($paid | Measure-Object Reducible      -Sum).Sum
+    $totalWaste = ($paid | Measure-Object EstAnnualWaste -Sum).Sum
+
+    Write-Host ("Idle seats: {0}   Reducible after buffer: {1}   Est. annual: \`\${2:N2}" -f $totalIdle, $totalRed, $totalWaste) -ForegroundColor Yellow
+
+    # Zero headroom. Anything with idle seats already appears in the table above.
+    $tight = $report | Where-Object { -not $_.IsFreeOrViral -and $_.Idle -eq 0 -and $_.Purchased -gt 1 }
+    if ($tight) {
+        Write-Host ''
+        Write-Host 'Fully consumed - no headroom for new hires:' -ForegroundColor Magenta
+        $tight | Sort-Object Purchased -Descending | Format-Table SkuPartNumber, Purchased, Assigned -AutoSize
+    }
+
+    # Seats in a warning or suspended state are already in a billing failure path.
+    $problem = $report | Where-Object { $_.WarningSeats -gt 0 -or $_.SuspendedSeats -gt 0 }
+    if ($problem) {
+        Write-Host 'Subscriptions in warning or suspended state:' -ForegroundColor Red
+        $problem | Format-Table SkuPartNumber, Purchased, WarningSeats, SuspendedSeats -AutoSize
+    }
+
+    if ($CsvPath) {
+        $report | Sort-Object EstAnnualWaste -Descending |
+            Export-Csv -Path $CsvPath -NoTypeInformation -Encoding UTF8
+        Write-Host "Full report written to $CsvPath" -ForegroundColor Green
+    }
+}
+finally {
+    Disconnect-MgGraph
+}`;
+
+  const idleSeatsScript = await prisma.script.upsert({
+    where: { slug: "get-idle-seats" },
+    update: {
+      description: "Read-only report of purchased Microsoft 365 seats that are not assigned to anyone. Filters out free/viral tiers, ranks SKUs by estimated annual waste, flags idle seats on subscriptions renewing soon, and lists fully consumed SKUs with no hiring headroom. Seat reductions must be made in the M365 admin center or via your CSP/EA contact.",
+      tags: "licenses,seats,idle,cost,waste,renewal,reporting",
+      content: IDLE_SEATS_SCRIPT,
+    },
+    create: {
+      name: "Idle Seat Report",
+      slug: "get-idle-seats",
+      description: "Read-only report of purchased Microsoft 365 seats that are not assigned to anyone. Filters out free/viral tiers, ranks SKUs by estimated annual waste, flags idle seats on subscriptions renewing soon, and lists fully consumed SKUs with no hiring headroom. Seat reductions must be made in the M365 admin center or via your CSP/EA contact.",
+      categoryId: reporting.id,
+      tags: "licenses,seats,idle,cost,waste,renewal,reporting",
+      content: IDLE_SEATS_SCRIPT,
+    },
+  });
+
+  const idleSeatsParams = [
+    {
+      id: "param-idleseats-buffer",
+      name: "Buffer",
+      label: "Seat Buffer",
+      type: "NUMBER" as const,
+      required: false,
+      defaultValue: "5",
+      description: "Seats to leave unassigned per SKU as hiring headroom. The Reducible column subtracts this from idle seats.",
+      sortOrder: 1,
+    },
+    {
+      id: "param-idleseats-renewalwindow",
+      name: "RenewalWindowDays",
+      label: "Renewal Window (days)",
+      type: "NUMBER" as const,
+      required: false,
+      defaultValue: "45",
+      description: "Idle seats on subscriptions renewing within this many days are flagged as urgent.",
+      sortOrder: 2,
+    },
+    {
+      id: "param-idleseats-viralthreshold",
+      name: "ViralSeatThreshold",
+      label: "Viral Seat Threshold",
+      type: "NUMBER" as const,
+      required: false,
+      defaultValue: "10000",
+      description: "SKUs with this many or more purchased seats are treated as free/viral tiers and excluded from the waste tables.",
+      sortOrder: 3,
+    },
+    {
+      id: "param-idleseats-excludeskus",
+      name: "ExcludeSkus",
+      label: "Excluded SKUs",
+      type: "STRING" as const,
+      required: false,
+      defaultValue: "DYN365_BUSCENTRAL_ESSENTIAL,DYN365_FINANCIALS_ACCOUNTANT_SKU",
+      description: "Comma-separated SkuPartNumbers suppressed from every section of the report, including the CSV. Wildcards supported.",
+      sortOrder: 4,
+    },
+    {
+      id: "param-idleseats-csvpath",
+      name: "CsvPath",
+      label: "CSV Export Path",
+      type: "STRING" as const,
+      required: false,
+      defaultValue: "",
+      description: "Optional path to write the full report as CSV. Leave blank to skip the export.",
+      sortOrder: 5,
+    },
+  ];
+
+  for (const param of idleSeatsParams) {
+    await prisma.scriptParameter.upsert({
+      where: { id: param.id },
+      update: {},
+      create: { ...param, scriptId: idleSeatsScript.id },
+    });
+  }
+
   // --- Offboarding: Deprovision User ---
 
   const OFFBOARD_USER_SCRIPT = `# Offboard / Deprovision User
@@ -3538,7 +3808,7 @@ finally {
 
   console.log("Seed completed successfully!");
   console.log("  Categories: 7");
-  console.log("  Scripts: 15");
+  console.log("  Scripts: 17");
 }
 
 main()
