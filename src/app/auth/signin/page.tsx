@@ -1,7 +1,34 @@
 import { signIn } from "@/auth";
-import { Terminal } from "lucide-react";
+import { Terminal, AlertTriangle } from "lucide-react";
 
-export default function SignInPage() {
+// Friendly messages for Auth.js error codes passed via ?error=
+// https://errors.authjs.dev
+const ERROR_MESSAGES: Record<string, string> = {
+  OAuthAccountNotLinked:
+    "This email is already associated with an account that isn't linked to Microsoft sign-in. Contact IT to resolve the account conflict.",
+  AccessDenied:
+    "Your account is not authorized to access this application. Only IT team members are permitted.",
+  OAuthCallbackError:
+    "Microsoft sign-in was cancelled or failed. Please try again.",
+  Configuration:
+    "The authentication service is misconfigured. Contact IT.",
+  Verification:
+    "The sign-in link is no longer valid. Please try again.",
+};
+
+const DEFAULT_ERROR_MESSAGE =
+  "An unexpected error occurred during sign in. Please try again.";
+
+export default async function SignInPage({
+  searchParams,
+}: {
+  searchParams: Promise<{ error?: string }>;
+}) {
+  const { error } = await searchParams;
+  const errorMessage = error
+    ? ERROR_MESSAGES[error] ?? DEFAULT_ERROR_MESSAGE
+    : null;
+
   return (
     <div className="min-h-screen flex items-center justify-center bg-gray-950">
       <div className="max-w-md w-full mx-4">
@@ -13,6 +40,26 @@ export default function SignInPage() {
           <p className="text-gray-400 text-center mb-8 text-sm">
             tools.it.yrefy — M365 Script Management
           </p>
+
+          {errorMessage && (
+            <div
+              role="alert"
+              className="mb-6 flex items-start gap-3 rounded-lg border border-red-800 bg-red-950/60 p-3"
+            >
+              <AlertTriangle className="h-5 w-5 shrink-0 text-red-500 mt-0.5" />
+              <div>
+                <p className="text-sm font-medium text-red-400">
+                  Sign-in failed
+                </p>
+                <p className="text-xs text-red-300/80 mt-1">{errorMessage}</p>
+                {error && (
+                  <p className="text-[10px] text-red-400/50 mt-1 font-mono">
+                    Code: {error}
+                  </p>
+                )}
+              </div>
+            </div>
+          )}
 
           <form
             action={async () => {
